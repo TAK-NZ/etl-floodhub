@@ -8,24 +8,25 @@ const ICONSET = 'bb4df0a6-ca8d-4ba8-bb9e-3deb97ff015e';
 const SEVERITY_ORDER = ['NO_FLOODING', 'ABOVE_NORMAL', 'SEVERE', 'EXTREME'] as const;
 type Severity = typeof SEVERITY_ORDER[number] | 'UNKNOWN';
 
+const FLOOD_ICON = `${ICONSET}:NaturalHazards/NH.01.Flood.png`;
+
 const SEVERITY_ICONS: Record<string, string> = {
-    'NO_FLOODING': `${ICONSET}:NaturalHazards/NH.01B.Flood.NoFlooding.png`,
-    'ABOVE_NORMAL': `${ICONSET}:NaturalHazards/NH.01B.Flood.AboveNormal.png`,
-    'SEVERE': `${ICONSET}:NaturalHazards/NH.01B.Flood.Severe.png`,
-    'EXTREME': `${ICONSET}:NaturalHazards/NH.01B.Flood.Extreme.png`,
-    'UNKNOWN': `${ICONSET}:NaturalHazards/NH.01B.Flood.Unknown.png`
+    'NO_FLOODING': FLOOD_ICON,
+    'ABOVE_NORMAL': FLOOD_ICON,
+    'SEVERE': FLOOD_ICON,
+    'EXTREME': FLOOD_ICON,
+    'UNKNOWN': FLOOD_ICON
 };
 
-const SEVERITY_COT_TYPE: Record<string, string> = {
-    'NO_FLOODING': 'a-f-G-E-W-F',
-    'ABOVE_NORMAL': 'a-f-G-E-W-F',
-    'SEVERE': 'a-f-G-E-W-F',
-    'EXTREME': 'a-f-G-E-W-F',
-    'UNKNOWN': 'a-f-G-E-W-F'
+const SEVERITY_COLORS: Record<string, string> = {
+    'NO_FLOODING': '#00FF00',
+    'ABOVE_NORMAL': '#FF8918',
+    'SEVERE': '#FF0000',
+    'EXTREME': '#800080',
+    'UNKNOWN': '#808080'
 };
 
 const FLASH_FLOOD_FILL = '#FF8918';
-const SIGNIFICANT_EVENT_FILL = '#FF0000';
 const POLYGON_OPACITY = 0.4;
 
 const Environment = Type.Object({
@@ -126,23 +127,19 @@ interface ForecastPoint {
 }
 
 interface FlashFloodEvent {
-    id: string;
-    startTime: string;
-    endTime?: string;
-    likelyAffectedArea?: { serializedPolygonId: string };
-    highlyLikelyAffectedArea?: { serializedPolygonId: string };
-    location?: { latitude: number; longitude: number };
+    forecastIssueTime: string;
+    forecastPeriodHours: number;
+    affectedCountryCodes: string[];
+    likelyAffectedPolygonId?: string;
+    highlyLikelyAffectedPolygonId?: string;
+    eventPolygonId?: string;
 }
 
 interface SignificantEvent {
-    id: string;
-    title: string;
-    startTime: string;
-    endTime?: string;
+    eventInterval?: { startTime: string; minimumEndTime?: string };
+    affectedCountryCodes?: string[];
     affectedPopulation?: number;
-    affectedAreaKm2?: number;
-    serializedPolygonId?: string;
-    location?: { latitude: number; longitude: number };
+    areaKm2?: number;
     gaugeIds?: string[];
 }
 
@@ -186,11 +183,7 @@ export default class Task extends ETL {
         return Type.Object({});
     }
 
-    private buildAreaBody(env: { REGION_CODE: string; BBOX: string }): object {
-        if (env.BBOX) {
-            const [minLat, minLon, maxLat, maxLon] = env.BBOX.split(',').map(Number);
-            return { boundingBox: { north: maxLat, south: minLat, east: maxLon, west: minLon } };
-        }
+    private buildAreaBody(env: { REGION_CODE: string }): object {
         return { regionCode: env.REGION_CODE };
     }
 
@@ -278,10 +271,9 @@ export default class Task extends ETL {
         }
     }
 
-    private async fetchFlashFloods(env: { REGION_CODE: string; BBOX: string; API_KEY: string; DEBUG: boolean }): Promise<FlashFloodEvent[]> {
+    private async fetchFlashFloods(apiKey: string, debug: boolean): Promise<FlashFloodEvent[]> {
         try {
-            const body = this.buildAreaBody(env);
-            const data = await this.apiPost('flashFloods:search', body, env.API_KEY, env.DEBUG) as { flashFloods?: FlashFloodEvent[] };
+            const data = await this.apiPost('flashFloods:search', {}, apiKey, debug) as { flashFloods?: FlashFloodEvent[] };
             return data.flashFloods || [];
         } catch (err) {
             console.warn('Failed to fetch flash floods:', err);
@@ -466,8 +458,9 @@ export default class Task extends ETL {
                 type: 'Feature',
                 properties: {
                     callsign: `Flood Gauge: ${status.gaugeId} — ${status.severity}${trendStr}`,
-                    type: SEVERITY_COT_TYPE[status.severity] || 'a-f-G-E-W-F',
-                    icon: SEVERITY_ICONS[status.severity] || SEVERITY_ICONS['UNKNOWN'],
+                    type: 'a-f-G-E-W-F',
+                    icon: SEVERITY_ICONS[status.severity] || FLOOD_ICON,
+                    'marker-color': SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'],
                     time: status.issuedTime,
                     start: status.issuedTime,
                     stale: status.forecastTimeRange?.end || new Date(Date.now() + 24 * 3600000).toISOString(),
@@ -490,11 +483,15 @@ export default class Task extends ETL {
 
         // Flash floods
         if (env.INCLUDE_FLASH_FLOODS) {
-            const flashFloods = await this.fetchFlashFloods(env);
-            console.log(`Fetched ${flashFloods.length} flash flood events`);
+            const allFlashFloods = await this.fetchFlashFloods(env.API_KEY, env.DEBUG);
+            const regionCode = env.BBOX ? '' : env.REGION_CODE;
+            const flashFloods = regionCode
+                ? allFlashFloods.filter(ff => ff.affectedCountryCodes?.includes(regionCode))
+                : allFlashFloods;
+            console.log(`Fetched ${allFlashFloods.length} flash flood events, ${flashFloods.length} in region`);
 
             for (const ff of flashFloods) {
-                const polygonId = ff.highlyLikelyAffectedArea?.serializedPolygonId || ff.likelyAffectedArea?.serializedPolygonId;
+                const polygonId = ff.highlyLikelyAffectedPolygonId || ff.likelyAffectedPolygonId;
                 if (polygonId) {
                     const coords = await this.fetchPolygonKml(polygonId, env.API_KEY, env.DEBUG);
                     if (coords) {
@@ -502,7 +499,7 @@ export default class Task extends ETL {
                             id: `floodhub-flash-${polygonId}`,
                             type: 'Feature',
                             properties: {
-                                callsign: `Flash Flood Event: ${ff.id}`,
+                                callsign: `Flash Flood: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
                                 type: 'a-f-G-E-W-F-F',
                                 stroke: FLASH_FLOOD_FILL,
                                 'stroke-opacity': POLYGON_OPACITY,
@@ -511,9 +508,10 @@ export default class Task extends ETL {
                                 'fill-opacity': POLYGON_OPACITY,
                                 fill: FLASH_FLOOD_FILL,
                                 remarks: [
-                                    `Flash Flood Event: ${ff.id}`,
-                                    `Start: ${ff.startTime}`,
-                                    ...(ff.endTime ? [`End: ${ff.endTime}`] : [])
+                                    `Flash Flood Event`,
+                                    `Countries: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
+                                    `Forecast issued: ${ff.forecastIssueTime}`,
+                                    `Forecast period: ${ff.forecastPeriodHours}h`
                                 ].join('\n')
                             },
                             geometry: { type: 'Polygon', coordinates: coords }
@@ -525,41 +523,41 @@ export default class Task extends ETL {
 
         // Significant events
         if (env.INCLUDE_SIGNIFICANT_EVENTS) {
-            const events = await this.fetchSignificantEvents(env.API_KEY, env.DEBUG);
-            // Filter to configured region by checking if event has gauges in our cache
-            const regionEvents = events.filter(e => {
-                if (!e.gaugeIds || e.gaugeIds.length === 0) return true;
-                return e.gaugeIds.some(id => gaugeCache[id]);
-            });
-            console.log(`Fetched ${events.length} significant events, ${regionEvents.length} relevant to region`);
+            const allEvents = await this.fetchSignificantEvents(env.API_KEY, env.DEBUG);
+            const regionCode = env.BBOX ? '' : env.REGION_CODE;
+            const regionEvents = regionCode
+                ? allEvents.filter(e => e.affectedCountryCodes?.includes(regionCode))
+                : allEvents;
+            console.log(`Fetched ${allEvents.length} significant events, ${regionEvents.length} in region`);
 
             for (const evt of regionEvents) {
-                if (evt.serializedPolygonId) {
-                    const coords = await this.fetchPolygonKml(evt.serializedPolygonId, env.API_KEY, env.DEBUG);
-                    if (coords) {
-                        features.push({
-                            id: `floodhub-event-${evt.serializedPolygonId}`,
-                            type: 'Feature',
-                            properties: {
-                                callsign: `Significant Event: ${evt.title || evt.id}`,
-                                type: 'a-f-G-E-W-F-S',
-                                stroke: SIGNIFICANT_EVENT_FILL,
-                                'stroke-opacity': POLYGON_OPACITY,
-                                'stroke-width': 2,
-                                'stroke-style': 'solid',
-                                'fill-opacity': POLYGON_OPACITY,
-                                fill: SIGNIFICANT_EVENT_FILL,
-                                remarks: [
-                                    `Significant Event: ${evt.title || evt.id}`,
-                                    `Start: ${evt.startTime}`,
-                                    ...(evt.endTime ? [`End: ${evt.endTime}`] : []),
-                                    ...(evt.affectedPopulation ? [`Affected Population: ${evt.affectedPopulation.toLocaleString()}`] : []),
-                                    ...(evt.affectedAreaKm2 ? [`Affected Area: ${evt.affectedAreaKm2.toFixed(1)} km²`] : [])
-                                ].join('\n')
-                            },
-                            geometry: { type: 'Polygon', coordinates: coords }
-                        });
-                    }
+                const countries = evt.affectedCountryCodes?.join(', ') || 'Unknown';
+                const remarkLines = [
+                    `Significant Flood Event`,
+                    `Countries: ${countries}`,
+                    ...(evt.eventInterval?.startTime ? [`Start: ${evt.eventInterval.startTime}`] : []),
+                    ...(evt.eventInterval?.minimumEndTime ? [`Min end: ${evt.eventInterval.minimumEndTime}`] : []),
+                    ...(evt.affectedPopulation ? [`Affected Population: ${evt.affectedPopulation.toLocaleString()}`] : []),
+                    ...(evt.areaKm2 ? [`Affected Area: ${evt.areaKm2.toFixed(1)} km²`] : []),
+                    ...(evt.gaugeIds?.length ? [`Gauges: ${evt.gaugeIds.length}`] : [])
+                ];
+
+                // Use first gauge location as a point marker if we have it in cache
+                const gaugeId = evt.gaugeIds?.find(id => gaugeCache[id]);
+                if (gaugeId) {
+                    const g = gaugeCache[gaugeId];
+                    features.push({
+                        id: `floodhub-event-${gaugeId}`,
+                        type: 'Feature',
+                        properties: {
+                            callsign: `Significant Event: ${countries}`,
+                            type: 'a-f-G-E-W-F-S',
+                            icon: FLOOD_ICON,
+                            'marker-color': SEVERITY_COLORS['EXTREME'],
+                            remarks: remarkLines.join('\n')
+                        },
+                        geometry: { type: 'Point', coordinates: [g.lon, g.lat] }
+                    });
                 }
             }
         }
