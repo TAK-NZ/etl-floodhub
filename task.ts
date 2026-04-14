@@ -35,6 +35,10 @@ const Environment = Type.Object({
         default: false,
         description: 'Include lower-confidence (non-quality-verified) gauges'
     }),
+    'Hide Normal Gauges': Type.Boolean({
+        default: true,
+        description: 'Hide gauges with NO_FLOODING severity to reduce map clutter'
+    }),
     'Include Flash Floods': Type.Boolean({
         default: true,
         description: 'Poll for flash flood events and render polygons'
@@ -102,7 +106,8 @@ interface GaugeInfo {
 }
 
 interface ForecastRange {
-    forecastTime: string;
+    forecastStartTime: string;
+    forecastEndTime: string;
     value: number;
 }
 
@@ -142,6 +147,10 @@ type Feature = {
 function severityIndex(s: string): number {
     const idx = SEVERITY_ORDER.indexOf(s as typeof SEVERITY_ORDER[number]);
     return idx >= 0 ? idx : -1;
+}
+
+function displaySeverity(s: string): string {
+    return s.replace(/_/g, ' ');
 }
 
 function classifySeverity(value: number, model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number }): string {
@@ -265,12 +274,15 @@ export default class Task extends ETL {
 
             try {
                 const data = await this.apiGet(`gauges:queryGaugeForecasts?${params.toString()}`, apiKey, debug) as {
-                    forecasts?: Record<string, { forecasts: Array<{ forecastRanges: ForecastRange[] }> }>;
+                    forecasts?: Record<string, { forecasts: Array<{ issuedTime: string; forecastRanges: ForecastRange[] }> }>;
                 };
                 if (data.forecasts) {
                     for (const [gaugeId, gaugeForecasts] of Object.entries(data.forecasts)) {
-                        // Use the most recent forecast's ranges
-                        const latest = gaugeForecasts.forecasts?.[0];
+                        // Use the most recent forecast (last by issuedTime)
+                        const sorted = (gaugeForecasts.forecasts || []).sort((a, b) =>
+                            (a.issuedTime || '').localeCompare(b.issuedTime || '')
+                        );
+                        const latest = sorted[sorted.length - 1];
                         if (latest?.forecastRanges?.length) {
                             result.set(gaugeId, latest.forecastRanges);
                         }
@@ -341,7 +353,7 @@ export default class Task extends ETL {
     ): string {
         const lines: string[] = [
             `Flood Gauge: ${status.gaugeId}`,
-            `Severity: ${status.severity}`,
+            `Severity: ${displaySeverity(status.severity)}`,
             ...(status.forecastTrend ? [`Trend: ${status.forecastTrend}`] : []),
             `Source: ${status.source}`,
             `Quality: ${status.qualityVerified ? 'Verified' : 'Lower-confidence'}`
@@ -357,9 +369,9 @@ export default class Task extends ETL {
         if (forecasts.length > 0 && model) {
             lines.push('', 'Forecast (m³/s):');
             for (const f of forecasts) {
-                const date = f.forecastTime.split('T')[0];
+                const date = f.forecastStartTime.split('T')[0];
                 const sev = classifySeverity(f.value, model);
-                lines.push(`  ${date}: ${f.value.toFixed(1)}${sev ? ` ← ${sev}` : ''}`);
+                lines.push(`  ${date}: ${f.value.toFixed(1)}${sev ? ` ← ${displaySeverity(sev)}` : ''}`);
             }
         }
 
@@ -456,6 +468,7 @@ export default class Task extends ETL {
         // Build gauge point features
         for (const status of statuses) {
             if (!status.gaugeLocation) continue;
+            if (env['Hide Normal Gauges'] && status.severity === 'NO_FLOODING') continue;
             const model = modelCache[status.gaugeId];
             const forecasts = forecastMap.get(status.gaugeId) || [];
             const remarks = this.buildGaugeRemarks(status, model, forecasts);
@@ -465,7 +478,7 @@ export default class Task extends ETL {
                 id: `floodhub-${status.gaugeId}`,
                 type: 'Feature',
                 properties: {
-                    callsign: `Flood Gauge: ${status.gaugeId} — ${status.severity}${trendStr}`,
+                    callsign: `Flood Gauge — ${displaySeverity(status.severity)}${trendStr}`,
                     type: 'a-f-G-E-W-F',
                     icon: FLOOD_ICON,
                     'marker-color': SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'],
