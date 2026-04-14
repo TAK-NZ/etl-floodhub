@@ -61,6 +61,15 @@ const Environment = Type.Object({
     })
 });
 
+const OutputSchema = Type.Object({
+    gaugeId: Type.String({ description: 'Unique gauge identifier (e.g. hybas_5120615530)' }),
+    severity: Type.String({ description: 'Flood severity level (NO FLOODING, ABOVE NORMAL, SEVERE, EXTREME, UNKNOWN)' }),
+    trend: Type.Optional(Type.String({ description: 'Forecast trend direction (RISE, FALL, STEADY)' })),
+    source: Type.String({ description: 'Gauge data source (e.g. HYBAS)' }),
+    qualityVerified: Type.Boolean({ description: 'Whether the gauge is quality-verified' }),
+    issuedTime: Type.String({ description: 'Forecast issue time (ISO 8601)' })
+});
+
 const EphemeralSchema = Type.Object({
     gauges: Type.Optional(Type.Object({
         lastRefresh: Type.String(),
@@ -170,7 +179,7 @@ export default class Task extends ETL {
     async schema(type: SchemaType = SchemaType.Input, flow: DataFlowType = DataFlowType.Incoming): Promise<TSchema> {
         if (flow === DataFlowType.Incoming) {
             if (type === SchemaType.Input) return Environment;
-            return Type.Object({});
+            return OutputSchema;
         }
         return Type.Object({});
     }
