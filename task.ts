@@ -39,6 +39,10 @@ const Environment = Type.Object({
         default: true,
         description: 'Hide gauges with NO FLOODING severity to reduce map clutter'
     }),
+    'SHOW_BASIN_POLYGONS': Type.Boolean({
+        default: true,
+        description: 'Show basin/catchment polygons for gauges above normal severity, coloured by severity level'
+    }),
     'INCLUDE_FLASH_FLOODS': Type.Boolean({
         default: true,
         description: 'Poll for flash flood events and render polygons'
@@ -518,6 +522,33 @@ export default class Task extends ETL {
             }
         }
 
+        // Render basin/notification polygons for elevated gauges
+        if (env.SHOW_BASIN_POLYGONS) {
+            let basinCount = 0;
+            for (const status of statuses) {
+                if (status.severity === 'NO_FLOODING' || status.severity === 'UNKNOWN') continue;
+                if (!status.serializedNotificationPolygonId) continue;
+                const polys = await this.fetchPolygons(status.serializedNotificationPolygonId, env.API_KEY, env.DEBUG);
+                const color = SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'];
+                for (let pi = 0; pi < polys.length; pi++) {
+                    features.push({
+                        id: `floodhub-basin-${status.gaugeId}-${pi}`,
+                        type: 'Feature',
+                        properties: {
+                            callsign: `Flood Basin: ${displaySeverity(status.severity)}`,
+                            type: 'a-f-G-E-W-F',
+                            stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
+                            'fill-opacity': POLYGON_OPACITY, fill: color,
+                            remarks: this.buildGaugeRemarks(status, modelCache[status.gaugeId], forecastMap.get(status.gaugeId) || [])
+                        },
+                        geometry: polys[pi]
+                    });
+                }
+                basinCount++;
+            }
+            if (basinCount > 0) console.log(`Rendered basin polygons for ${basinCount} elevated gauges`);
+        }
+
         // Build gauge point features
         for (const status of statuses) {
             if (!status.gaugeLocation) continue;
@@ -609,7 +640,7 @@ export default class Task extends ETL {
                             id: `floodhub-event-${evt.eventPolygonId}-${pi}`,
                             type: 'Feature',
                             properties: {
-                                callsign: `Significant Event: ${countries}`,
+                                callsign: `Significant Flood Event: ${countries}`,
                                 type: 'a-f-G-E-W-F-S',
                                 stroke: SIGNIFICANT_EVENT_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                                 'fill-opacity': POLYGON_OPACITY, fill: SIGNIFICANT_EVENT_FILL,
