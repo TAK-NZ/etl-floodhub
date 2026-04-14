@@ -398,10 +398,14 @@ export default class Task extends ETL {
 
         if (needsRefresh) {
             console.log('Refreshing gauge discovery...');
-            const { items, models } = await this.refreshGauges(env);
-            ephemeral.gauges = { lastRefresh: now.toISOString(), items };
-            ephemeral.models = models;
-            await this.setEphemeral(ephemeral);
+            try {
+                const { items, models } = await this.refreshGauges(env);
+                ephemeral.gauges = { lastRefresh: now.toISOString(), items };
+                ephemeral.models = models;
+                await this.setEphemeral(ephemeral);
+            } catch (err) {
+                console.warn('Gauge discovery failed (non-fatal):', err);
+            }
         }
 
         const gaugeCache = ephemeral.gauges?.items || {};
