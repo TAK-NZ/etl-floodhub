@@ -369,7 +369,7 @@ export default class Task extends ETL {
         if (forecasts.length > 0 && model) {
             lines.push('', 'Forecast (m³/s):');
             for (const f of forecasts) {
-                const date = f.forecastStartTime.split('T')[0];
+                const date = (f.forecastStartTime || f.forecastEndTime || '').split('T')[0] || 'Unknown';
                 const sev = classifySeverity(f.value, model);
                 lines.push(`  ${date}: ${f.value.toFixed(1)}${sev ? ` ← ${displaySeverity(sev)}` : ''}`);
             }
