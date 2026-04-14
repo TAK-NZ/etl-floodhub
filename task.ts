@@ -228,6 +228,10 @@ export default class Task extends ETL {
         const items: Record<string, { lat: number; lon: number; source: string; qualityVerified: boolean }> = {};
         const gaugeIds: string[] = [];
         for (const g of gauges) {
+            if (!g.gaugeLocation) {
+                console.warn(`Gauge ${g.gaugeId} has no location, skipping`);
+                continue;
+            }
             items[g.gaugeId] = {
                 lat: g.gaugeLocation.latitude,
                 lon: g.gaugeLocation.longitude,
@@ -448,6 +452,10 @@ export default class Task extends ETL {
 
         // Build gauge point features
         for (const status of filtered) {
+            if (!status.gaugeLocation) {
+                console.warn(`Flood status for ${status.gaugeId} has no location, skipping`);
+                continue;
+            }
             const model = modelCache[status.gaugeId];
             const forecasts = forecastMap.get(status.gaugeId) || [];
             const remarks = this.buildGaugeRemarks(status, model, forecasts);
