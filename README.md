@@ -310,6 +310,8 @@ Note: Google updates forecasts approximately once per day, so polling more frequ
 }
 ```
 
+![Google FloodHub flood forecasting data](docs/etl-floodhub.png)
+
 ## Deployment
 
 Deployment into the CloudTAK environment for ETL tasks is done via automatic releases to the TAK.NZ AWS environment.
