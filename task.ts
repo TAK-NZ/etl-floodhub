@@ -10,14 +10,6 @@ type Severity = typeof SEVERITY_ORDER[number] | 'UNKNOWN';
 
 const FLOOD_ICON = `${ICONSET}:NaturalHazards/NH.01.Flood.png`;
 
-const SEVERITY_ICONS: Record<string, string> = {
-    'NO_FLOODING': FLOOD_ICON,
-    'ABOVE_NORMAL': FLOOD_ICON,
-    'SEVERE': FLOOD_ICON,
-    'EXTREME': FLOOD_ICON,
-    'UNKNOWN': FLOOD_ICON
-};
-
 const SEVERITY_COLORS: Record<string, string> = {
     'NO_FLOODING': '#00FF00',
     'ABOVE_NORMAL': '#FF8918',
@@ -27,44 +19,19 @@ const SEVERITY_COLORS: Record<string, string> = {
 };
 
 const FLASH_FLOOD_FILL = '#FF8918';
+const SIGNIFICANT_EVENT_FILL = '#FF0000';
 const POLYGON_OPACITY = 0.4;
+const PAGE_SIZE = 10000;
 
 const Environment = Type.Object({
-    API_KEY: Type.String({
-        description: 'Google Flood Forecasting API key'
-    }),
-    REGION_CODE: Type.String({
-        default: 'NZ',
-        description: 'ISO 3166 alpha-2 country code for area search. Leave empty to use BBOX instead.'
-    }),
-    BBOX: Type.String({
-        default: '',
-        description: 'Custom bounding box as minLat,minLon,maxLat,maxLon. Overrides REGION_CODE when set.'
-    }),
-    INCLUDE_UNVERIFIED: Type.Boolean({
-        default: false,
-        description: 'Include lower-confidence (non-quality-verified) gauges'
-    }),
-    INCLUDE_FLASH_FLOODS: Type.Boolean({
-        default: true,
-        description: 'Poll for flash flood events and render polygons'
-    }),
-    INCLUDE_SIGNIFICANT_EVENTS: Type.Boolean({
-        default: true,
-        description: 'Poll for significant high-impact events'
-    }),
-    FORECAST_DETAIL_THRESHOLD: Type.String({
-        default: 'ABOVE_NORMAL',
-        description: 'Minimum severity to fetch detailed 8-day forecast (NO_FLOODING, ABOVE_NORMAL, SEVERE, EXTREME)'
-    }),
-    GAUGE_REFRESH_HOURS: Type.Number({
-        default: 24,
-        description: 'Hours between gauge discovery refreshes'
-    }),
-    DEBUG: Type.Boolean({
-        default: false,
-        description: 'Log raw API responses'
-    })
+    API_KEY: Type.String({ description: 'Google Flood Forecasting API key' }),
+    REGION_CODE: Type.String({ default: 'NZ', description: 'ISO 3166 alpha-2 country code for area search' }),
+    INCLUDE_UNVERIFIED: Type.Boolean({ default: false, description: 'Include lower-confidence (non-quality-verified) gauges' }),
+    INCLUDE_FLASH_FLOODS: Type.Boolean({ default: true, description: 'Poll for flash flood events and render polygons' }),
+    INCLUDE_SIGNIFICANT_EVENTS: Type.Boolean({ default: true, description: 'Poll for significant high-impact events' }),
+    FORECAST_DETAIL_THRESHOLD: Type.String({ default: 'ABOVE_NORMAL', description: 'Minimum severity to fetch detailed forecast (NO_FLOODING, ABOVE_NORMAL, SEVERE, EXTREME)' }),
+    GAUGE_REFRESH_HOURS: Type.Number({ default: 24, description: 'Hours between gauge discovery refreshes' }),
+    DEBUG: Type.Boolean({ default: false, description: 'Log raw API responses' })
 });
 
 const EphemeralSchema = Type.Object({
@@ -92,36 +59,26 @@ interface FloodStatus {
     forecastTrend?: string;
     severity: Severity;
     source: string;
-    gaugeLocation: { latitude: number; longitude: number };
+    gaugeLocation?: { latitude: number; longitude: number };
     qualityVerified: boolean;
-    inundationMapSet?: InundationMapSet;
-}
-
-interface InundationMapSet {
-    inundationMaps: Array<{
-        mapType: string;
-        inundationMapLevels: Array<{
-            level: string;
-            serializedPolygonId: string;
-        }>;
-    }>;
+    inundationMapSet?: { inundationMaps: Array<{ mapType: string; inundationMapLevels: Array<{ level: string; serializedPolygonId: string }> }> };
+    serializedNotificationPolygonId?: string;
 }
 
 interface GaugeModel {
     gaugeId: string;
     thresholds: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number };
     gaugeValueUnit: string;
-    qualityVerified: boolean;
 }
 
 interface GaugeInfo {
     gaugeId: string;
-    gaugeLocation: { latitude: number; longitude: number };
+    gaugeLocation?: { latitude: number; longitude: number };
     source: string;
     qualityVerified: boolean;
 }
 
-interface ForecastPoint {
+interface ForecastRange {
     forecastTime: string;
     value: number;
 }
@@ -140,6 +97,7 @@ interface SignificantEvent {
     affectedCountryCodes?: string[];
     affectedPopulation?: number;
     areaKm2?: number;
+    eventPolygonId?: string;
     gaugeIds?: string[];
 }
 
@@ -183,10 +141,6 @@ export default class Task extends ETL {
         return Type.Object({});
     }
 
-    private buildAreaBody(env: { REGION_CODE: string }): object {
-        return { regionCode: env.REGION_CODE };
-    }
-
     private async apiGet(path: string, apiKey: string, debug: boolean): Promise<unknown> {
         const url = `${API_BASE}/${path}${path.includes('?') ? '&' : '?'}key=${apiKey}`;
         const res = await fetch(url);
@@ -209,39 +163,50 @@ export default class Task extends ETL {
         return data;
     }
 
-    private async refreshGauges(env: { REGION_CODE: string; BBOX: string; API_KEY: string; DEBUG: boolean }): Promise<{
+    private async paginatedPost<T>(path: string, baseBody: object, apiKey: string, debug: boolean, resultKey: string): Promise<T[]> {
+        const results: T[] = [];
+        let pageToken: string | undefined;
+        do {
+            const body = { ...baseBody, pageSize: PAGE_SIZE, ...(pageToken ? { pageToken } : {}) };
+            const data = await this.apiPost(path, body, apiKey, debug) as Record<string, unknown>;
+            const items = (data[resultKey] || []) as T[];
+            results.push(...items);
+            pageToken = data.nextPageToken as string | undefined;
+        } while (pageToken);
+        return results;
+    }
+
+    private async refreshGauges(env: { REGION_CODE: string; INCLUDE_UNVERIFIED: boolean; API_KEY: string; DEBUG: boolean }): Promise<{
         items: Record<string, { lat: number; lon: number; source: string; qualityVerified: boolean }>;
         models: Record<string, { warningLevel: number; dangerLevel: number; extremeDangerLevel: number; gaugeValueUnit: string }>;
     }> {
-        const body = this.buildAreaBody(env);
-        const data = await this.apiPost('gauges:searchGaugesByArea', body, env.API_KEY, env.DEBUG) as { gauges?: GaugeInfo[] };
-        const gauges = data.gauges || [];
+        const body = { regionCode: env.REGION_CODE, includeNonQualityVerified: env.INCLUDE_UNVERIFIED };
+        const gauges = await this.paginatedPost<GaugeInfo>('gauges:searchGaugesByArea', body, env.API_KEY, env.DEBUG, 'gauges');
         console.log(`Discovered ${gauges.length} gauges`);
 
         const items: Record<string, { lat: number; lon: number; source: string; qualityVerified: boolean }> = {};
         const gaugeIds: string[] = [];
         for (const g of gauges) {
-            if (!g.gaugeLocation) {
-                console.warn(`Gauge ${g.gaugeId} has no location, skipping`);
-                continue;
+            // gaugeLocation may be absent on discovery — we'll get it from flood status
+            if (g.gaugeLocation) {
+                items[g.gaugeId] = {
+                    lat: g.gaugeLocation.latitude,
+                    lon: g.gaugeLocation.longitude,
+                    source: g.source,
+                    qualityVerified: g.qualityVerified
+                };
             }
-            items[g.gaugeId] = {
-                lat: g.gaugeLocation.latitude,
-                lon: g.gaugeLocation.longitude,
-                source: g.source,
-                qualityVerified: g.qualityVerified
-            };
             gaugeIds.push(g.gaugeId);
         }
 
-        // Batch fetch gauge models (thresholds)
+        // Batch fetch gauge models using names=gaugeModels/{id} format
         const models: Record<string, { warningLevel: number; dangerLevel: number; extremeDangerLevel: number; gaugeValueUnit: string }> = {};
-        const batchSize = 500;
+        const batchSize = 50;
         for (let i = 0; i < gaugeIds.length; i += batchSize) {
             const batch = gaugeIds.slice(i, i + batchSize);
-            const ids = batch.map(id => `ids=${encodeURIComponent(id)}`).join('&');
+            const names = batch.map(id => `names=gaugeModels/${encodeURIComponent(id)}`).join('&');
             try {
-                const modelData = await this.apiGet(`gaugeModels:batchGet?${ids}`, env.API_KEY, env.DEBUG) as { gaugeModels?: GaugeModel[] };
+                const modelData = await this.apiGet(`gaugeModels:batchGet?${names}`, env.API_KEY, env.DEBUG) as { gaugeModels?: GaugeModel[] };
                 for (const m of modelData.gaugeModels || []) {
                     models[m.gaugeId] = {
                         warningLevel: m.thresholds.warningLevel,
@@ -259,22 +224,45 @@ export default class Task extends ETL {
         return { items, models };
     }
 
-    private async fetchForecasts(gaugeId: string, apiKey: string, debug: boolean): Promise<ForecastPoint[]> {
-        try {
-            const data = await this.apiGet(`gauges/${encodeURIComponent(gaugeId)}:queryGaugeForecasts`, apiKey, debug) as {
-                forecasts?: Array<{ forecastTime: string; value: number }>;
-            };
-            return data.forecasts || [];
-        } catch (err) {
-            console.warn(`Failed to fetch forecast for ${gaugeId}:`, err);
-            return [];
+    private async fetchForecasts(gaugeIds: string[], apiKey: string, debug: boolean): Promise<Map<string, ForecastRange[]>> {
+        const result = new Map<string, ForecastRange[]>();
+        if (gaugeIds.length === 0) return result;
+
+        const now = new Date();
+        const lastWeek = new Date(now.getTime() - 7 * 86400000);
+        const tomorrow = new Date(now.getTime() + 86400000);
+
+        const batchSize = 500;
+        for (let i = 0; i < gaugeIds.length; i += batchSize) {
+            const batch = gaugeIds.slice(i, i + batchSize);
+            const params = new URLSearchParams();
+            for (const id of batch) params.append('gaugeIds', id);
+            params.set('issuedTimeStart', lastWeek.toISOString().split('T')[0]);
+            params.set('issuedTimeEnd', tomorrow.toISOString().split('T')[0]);
+
+            try {
+                const data = await this.apiGet(`gauges:queryGaugeForecasts?${params.toString()}`, apiKey, debug) as {
+                    forecasts?: Record<string, { forecasts: Array<{ forecastRanges: ForecastRange[] }> }>;
+                };
+                if (data.forecasts) {
+                    for (const [gaugeId, gaugeForecasts] of Object.entries(data.forecasts)) {
+                        // Use the most recent forecast's ranges
+                        const latest = gaugeForecasts.forecasts?.[0];
+                        if (latest?.forecastRanges?.length) {
+                            result.set(gaugeId, latest.forecastRanges);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn(`Failed to fetch forecasts batch ${i}:`, err);
+            }
         }
+        return result;
     }
 
     private async fetchFlashFloods(apiKey: string, debug: boolean): Promise<FlashFloodEvent[]> {
         try {
-            const data = await this.apiPost('flashFloods:search', {}, apiKey, debug) as { flashFloods?: FlashFloodEvent[] };
-            return data.flashFloods || [];
+            return await this.paginatedPost<FlashFloodEvent>('flashFloods:search', {}, apiKey, debug, 'flashFloods');
         } catch (err) {
             console.warn('Failed to fetch flash floods:', err);
             return [];
@@ -283,8 +271,7 @@ export default class Task extends ETL {
 
     private async fetchSignificantEvents(apiKey: string, debug: boolean): Promise<SignificantEvent[]> {
         try {
-            const data = await this.apiPost('significantEvents:search', {}, apiKey, debug) as { significantEvents?: SignificantEvent[] };
-            return data.significantEvents || [];
+            return await this.paginatedPost<SignificantEvent>('significantEvents:search', {}, apiKey, debug, 'significantEvents');
         } catch (err) {
             console.warn('Failed to fetch significant events:', err);
             return [];
@@ -318,7 +305,6 @@ export default class Task extends ETL {
         }
         if (points.length < 3) return null;
 
-        // Ensure closed
         if (points[0][0] !== points[points.length - 1][0] || points[0][1] !== points[points.length - 1][1]) {
             points.push([...points[0]]);
         }
@@ -328,7 +314,7 @@ export default class Task extends ETL {
     private buildGaugeRemarks(
         status: FloodStatus,
         model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number; gaugeValueUnit: string } | undefined,
-        forecasts: ForecastPoint[]
+        forecasts: ForecastRange[]
     ): string {
         const lines: string[] = [
             `Flood Gauge: ${status.gaugeId}`,
@@ -386,36 +372,42 @@ export default class Task extends ETL {
         const gaugeCache = ephemeral.gauges?.items || {};
         const modelCache = ephemeral.models || {};
 
-        // Fetch flood status (primary polling target)
-        const areaBody = this.buildAreaBody(env);
-        const statusData = await this.apiPost('floodStatus:searchLatestFloodStatusByArea', areaBody, env.API_KEY, env.DEBUG) as {
-            floodStatuses?: FloodStatus[];
+        // Fetch flood status with pagination and includeNonQualityVerified
+        const statusBody = {
+            regionCode: env.REGION_CODE,
+            includeNonQualityVerified: env.INCLUDE_UNVERIFIED
         };
-        const statuses = statusData.floodStatuses || [];
+        const statuses = await this.paginatedPost<FloodStatus>(
+            'floodStatus:searchLatestFloodStatusByArea', statusBody, env.API_KEY, env.DEBUG, 'floodStatuses'
+        );
         console.log(`Fetched ${statuses.length} flood statuses`);
 
-        // Filter by quality if configured
-        const filtered = env.INCLUDE_UNVERIFIED ? statuses : statuses.filter(s => s.qualityVerified);
-        console.log(`Processing ${filtered.length} gauges (${env.INCLUDE_UNVERIFIED ? 'all' : 'verified only'})`);
+        // Update gauge cache with locations from flood status (gauge discovery may not have them)
+        for (const s of statuses) {
+            if (s.gaugeLocation && !gaugeCache[s.gaugeId]) {
+                gaugeCache[s.gaugeId] = {
+                    lat: s.gaugeLocation.latitude,
+                    lon: s.gaugeLocation.longitude,
+                    source: s.source,
+                    qualityVerified: s.qualityVerified
+                };
+            }
+        }
 
         // Determine which gauges need detailed forecasts
         const thresholdIdx = severityIndex(env.FORECAST_DETAIL_THRESHOLD);
-        const forecastGaugeIds = filtered
+        const forecastGaugeIds = statuses
             .filter(s => severityIndex(s.severity) >= thresholdIdx && thresholdIdx >= 0)
             .map(s => s.gaugeId);
 
         // Batch fetch forecasts for elevated gauges
-        const forecastMap = new Map<string, ForecastPoint[]>();
-        for (const gaugeId of forecastGaugeIds) {
-            const forecasts = await this.fetchForecasts(gaugeId, env.API_KEY, env.DEBUG);
-            if (forecasts.length > 0) forecastMap.set(gaugeId, forecasts);
-        }
+        const forecastMap = await this.fetchForecasts(forecastGaugeIds, env.API_KEY, env.DEBUG);
         if (forecastGaugeIds.length > 0) {
             console.log(`Fetched forecasts for ${forecastMap.size}/${forecastGaugeIds.length} elevated gauges`);
         }
 
-        // Check for inundation maps on each status
-        for (const status of filtered) {
+        // Check for inundation maps
+        for (const status of statuses) {
             if (status.inundationMapSet?.inundationMaps) {
                 for (const map of status.inundationMapSet.inundationMaps) {
                     for (const level of map.inundationMapLevels || []) {
@@ -428,12 +420,8 @@ export default class Task extends ETL {
                             properties: {
                                 callsign: `Inundation: ${status.gaugeId} — ${map.mapType} ${level.level}`,
                                 type: 'a-f-G-E-W-F',
-                                stroke: fillColor,
-                                'stroke-opacity': POLYGON_OPACITY,
-                                'stroke-width': 2,
-                                'stroke-style': 'solid',
-                                'fill-opacity': POLYGON_OPACITY,
-                                fill: fillColor
+                                stroke: fillColor, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
+                                'fill-opacity': POLYGON_OPACITY, fill: fillColor
                             },
                             geometry: { type: 'Polygon', coordinates: coords }
                         });
@@ -443,11 +431,8 @@ export default class Task extends ETL {
         }
 
         // Build gauge point features
-        for (const status of filtered) {
-            if (!status.gaugeLocation) {
-                console.warn(`Flood status for ${status.gaugeId} has no location, skipping`);
-                continue;
-            }
+        for (const status of statuses) {
+            if (!status.gaugeLocation) continue;
             const model = modelCache[status.gaugeId];
             const forecasts = forecastMap.get(status.gaugeId) || [];
             const remarks = this.buildGaugeRemarks(status, model, forecasts);
@@ -459,19 +444,15 @@ export default class Task extends ETL {
                 properties: {
                     callsign: `Flood Gauge: ${status.gaugeId} — ${status.severity}${trendStr}`,
                     type: 'a-f-G-E-W-F',
-                    icon: SEVERITY_ICONS[status.severity] || FLOOD_ICON,
+                    icon: FLOOD_ICON,
                     'marker-color': SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'],
                     time: status.issuedTime,
                     start: status.issuedTime,
                     stale: status.forecastTimeRange?.end || new Date(Date.now() + 24 * 3600000).toISOString(),
                     remarks,
                     metadata: {
-                        gaugeId: status.gaugeId,
-                        severity: status.severity,
-                        trend: status.forecastTrend,
-                        source: status.source,
-                        qualityVerified: status.qualityVerified,
-                        issuedTime: status.issuedTime
+                        gaugeId: status.gaugeId, severity: status.severity, trend: status.forecastTrend,
+                        source: status.source, qualityVerified: status.qualityVerified, issuedTime: status.issuedTime
                     }
                 },
                 geometry: {
@@ -481,59 +462,47 @@ export default class Task extends ETL {
             });
         }
 
-        // Flash floods
+        // Flash floods (global endpoint, filter client-side)
         if (env.INCLUDE_FLASH_FLOODS) {
             const allFlashFloods = await this.fetchFlashFloods(env.API_KEY, env.DEBUG);
-            const regionCode = env.BBOX ? '' : env.REGION_CODE;
-            const flashFloods = regionCode
-                ? allFlashFloods.filter(ff => ff.affectedCountryCodes?.includes(regionCode))
-                : allFlashFloods;
+            const flashFloods = allFlashFloods.filter(ff => ff.affectedCountryCodes?.includes(env.REGION_CODE));
             console.log(`Fetched ${allFlashFloods.length} flash flood events, ${flashFloods.length} in region`);
 
             for (const ff of flashFloods) {
-                const polygonId = ff.highlyLikelyAffectedPolygonId || ff.likelyAffectedPolygonId;
-                if (polygonId) {
-                    const coords = await this.fetchPolygonKml(polygonId, env.API_KEY, env.DEBUG);
-                    if (coords) {
-                        features.push({
-                            id: `floodhub-flash-${polygonId}`,
-                            type: 'Feature',
-                            properties: {
-                                callsign: `Flash Flood: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
-                                type: 'a-f-G-E-W-F-F',
-                                stroke: FLASH_FLOOD_FILL,
-                                'stroke-opacity': POLYGON_OPACITY,
-                                'stroke-width': 2,
-                                'stroke-style': 'solid',
-                                'fill-opacity': POLYGON_OPACITY,
-                                fill: FLASH_FLOOD_FILL,
-                                remarks: [
-                                    `Flash Flood Event`,
-                                    `Countries: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
-                                    `Forecast issued: ${ff.forecastIssueTime}`,
-                                    `Forecast period: ${ff.forecastPeriodHours}h`
-                                ].join('\n')
-                            },
-                            geometry: { type: 'Polygon', coordinates: coords }
-                        });
-                    }
-                }
+                const polygonId = ff.highlyLikelyAffectedPolygonId || ff.likelyAffectedPolygonId || ff.eventPolygonId;
+                if (!polygonId) continue;
+                const coords = await this.fetchPolygonKml(polygonId, env.API_KEY, env.DEBUG);
+                if (!coords) continue;
+                features.push({
+                    id: `floodhub-flash-${polygonId}`,
+                    type: 'Feature',
+                    properties: {
+                        callsign: `Flash Flood: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
+                        type: 'a-f-G-E-W-F-F',
+                        stroke: FLASH_FLOOD_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
+                        'fill-opacity': POLYGON_OPACITY, fill: FLASH_FLOOD_FILL,
+                        remarks: [
+                            'Flash Flood Event',
+                            `Countries: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
+                            `Forecast issued: ${ff.forecastIssueTime}`,
+                            `Forecast period: ${ff.forecastPeriodHours}h`
+                        ].join('\n')
+                    },
+                    geometry: { type: 'Polygon', coordinates: coords }
+                });
             }
         }
 
-        // Significant events
+        // Significant events (global endpoint, filter client-side)
         if (env.INCLUDE_SIGNIFICANT_EVENTS) {
             const allEvents = await this.fetchSignificantEvents(env.API_KEY, env.DEBUG);
-            const regionCode = env.BBOX ? '' : env.REGION_CODE;
-            const regionEvents = regionCode
-                ? allEvents.filter(e => e.affectedCountryCodes?.includes(regionCode))
-                : allEvents;
+            const regionEvents = allEvents.filter(e => e.affectedCountryCodes?.includes(env.REGION_CODE));
             console.log(`Fetched ${allEvents.length} significant events, ${regionEvents.length} in region`);
 
             for (const evt of regionEvents) {
                 const countries = evt.affectedCountryCodes?.join(', ') || 'Unknown';
                 const remarkLines = [
-                    `Significant Flood Event`,
+                    'Significant Flood Event',
                     `Countries: ${countries}`,
                     ...(evt.eventInterval?.startTime ? [`Start: ${evt.eventInterval.startTime}`] : []),
                     ...(evt.eventInterval?.minimumEndTime ? [`Min end: ${evt.eventInterval.minimumEndTime}`] : []),
@@ -542,22 +511,23 @@ export default class Task extends ETL {
                     ...(evt.gaugeIds?.length ? [`Gauges: ${evt.gaugeIds.length}`] : [])
                 ];
 
-                // Use first gauge location as a point marker if we have it in cache
-                const gaugeId = evt.gaugeIds?.find(id => gaugeCache[id]);
-                if (gaugeId) {
-                    const g = gaugeCache[gaugeId];
-                    features.push({
-                        id: `floodhub-event-${gaugeId}`,
-                        type: 'Feature',
-                        properties: {
-                            callsign: `Significant Event: ${countries}`,
-                            type: 'a-f-G-E-W-F-S',
-                            icon: FLOOD_ICON,
-                            'marker-color': SEVERITY_COLORS['EXTREME'],
-                            remarks: remarkLines.join('\n')
-                        },
-                        geometry: { type: 'Point', coordinates: [g.lon, g.lat] }
-                    });
+                // Render event polygon if available
+                if (evt.eventPolygonId) {
+                    const coords = await this.fetchPolygonKml(evt.eventPolygonId, env.API_KEY, env.DEBUG);
+                    if (coords) {
+                        features.push({
+                            id: `floodhub-event-${evt.eventPolygonId}`,
+                            type: 'Feature',
+                            properties: {
+                                callsign: `Significant Event: ${countries}`,
+                                type: 'a-f-G-E-W-F-S',
+                                stroke: SIGNIFICANT_EVENT_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
+                                'fill-opacity': POLYGON_OPACITY, fill: SIGNIFICANT_EVENT_FILL,
+                                remarks: remarkLines.join('\n')
+                            },
+                            geometry: { type: 'Polygon', coordinates: coords }
+                        });
+                    }
                 }
             }
         }
