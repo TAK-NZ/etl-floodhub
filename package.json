@@ -23,6 +23,6 @@
         "@tak-ps/etl": "^10.4.0"
     },
     "overrides": {
-        "fast-xml-parser": "5.3.9"
+        "fast-xml-parser": "5.5.12"
     }
 }
