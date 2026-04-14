@@ -40,8 +40,8 @@ const Environment = Type.Object({
         description: 'Hide gauges with NO FLOODING severity to reduce map clutter'
     }),
     'SHOW_BASIN_POLYGONS': Type.Boolean({
-        default: true,
-        description: 'Show basin/catchment polygons for gauges above normal severity, coloured by severity level'
+        default: false,
+        description: 'Show notification polygons for elevated gauges, coloured by severity. WARNING: produces large payloads that may crash CloudTAK with many elevated gauges. Basin/catchment polygons from HydroBASINS are not available via the API.'
     }),
     'INCLUDE_FLASH_FLOODS': Type.Boolean({
         default: true,
