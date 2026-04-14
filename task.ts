@@ -427,7 +427,15 @@ export default class Task extends ETL {
             }
         }
 
-        lines.push('', `Forecast issued: ${status.issuedTime}`);
+        lines.push('', `Forecast issued: ${status.issuedTime.replace('Z', ' UTC')}`);
+        try {
+            const nzt = new Date(status.issuedTime).toLocaleString('en-NZ', {
+                timeZone: 'Pacific/Auckland',
+                day: 'numeric', month: 'short', year: 'numeric',
+                hour: 'numeric', minute: '2-digit', hour12: true
+            });
+            lines.push(`Forecast issued: ${nzt} NZT`);
+        } catch { /* ignore timezone errors */ }
         return lines.join('\n');
     }
 
