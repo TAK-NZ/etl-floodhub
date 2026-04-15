@@ -48,11 +48,11 @@ The API provides a pre-computed `severity` field per gauge based on forecast val
 
 | Severity | Meaning | Colour | CoT Mapping |
 |---|---|---|---|
-| `NO_FLOODING` | Below warning level | 🟢 Green | Normal |
-| `ABOVE_NORMAL` | Above warning, below danger | 🟠 Orange | Warning |
-| `SEVERE` | Above danger, below extreme | 🔴 Red | Danger |
-| `EXTREME` | Above extreme danger level | 🟣 Purple | Extreme |
-| `UNKNOWN` | Insufficient data | ⚪ Grey | Unknown |
+| `NO_FLOODING` | Below warning level | 🟢 Green (#00FF00) | Normal |
+| `ABOVE_NORMAL` | Above warning, below danger | 🟠 Orange (#FF7700) | Warning |
+| `SEVERE` | Above danger, below extreme | 🔴 Red (#FF0000) | Danger |
+| `EXTREME` | Above extreme danger level | 🟣 Purple (#7F007F) | Extreme |
+| `UNKNOWN` | Insufficient data | ⚪ Grey (#777777) | Unknown |
 
 Each gauge model defines three thresholds in cubic metres per second (m³/s):
 - `warningLevel` → triggers ABOVE_NORMAL
@@ -123,7 +123,7 @@ Each gauge model defines three thresholds in cubic metres per second (m³/s):
 | CoT type | `a-f-G-E-W-F-F` (flash flood) |
 | CoT UID | `floodhub-flash-{polygonId}` |
 | Geometry | Polygon from KML via `serializedPolygons` |
-| Fill colour | Orange with 40% opacity |
+| Fill colour | Orange (#FF7700) with 40% opacity |
 
 ### Significant Event Polygons
 
@@ -132,7 +132,7 @@ Each gauge model defines three thresholds in cubic metres per second (m³/s):
 | CoT type | `a-f-G-E-W-F-S` (significant event) |
 | CoT UID | `floodhub-event-{polygonId}` |
 | Geometry | Polygon from KML via `serializedPolygons` |
-| Fill colour | Red with 40% opacity |
+| Fill colour | Red (#FF0000) with 40% opacity |
 
 ### Icon Colour Mapping
 
@@ -140,11 +140,11 @@ Custom iconset icons for each severity level:
 
 | Severity | Icon | Colour |
 |---|---|---|
-| NO_FLOODING | `NaturalHazards/NH.01B.Flood.NoFlooding.png` | Green |
-| ABOVE_NORMAL | `NaturalHazards/NH.01B.Flood.AboveNormal.png` | Orange |
-| SEVERE | `NaturalHazards/NH.01B.Flood.Severe.png` | Red |
-| EXTREME | `NaturalHazards/NH.01B.Flood.Extreme.png` | Purple |
-| UNKNOWN | `NaturalHazards/NH.01B.Flood.Unknown.png` | Grey |
+| NO_FLOODING | `NaturalHazards/NH.01B.Flood.NoFlooding.png` | Green (#00FF00) |
+| ABOVE_NORMAL | `NaturalHazards/NH.01B.Flood.AboveNormal.png` | Orange (#FF7700) |
+| SEVERE | `NaturalHazards/NH.01B.Flood.Severe.png` | Red (#FF0000) |
+| EXTREME | `NaturalHazards/NH.01B.Flood.Extreme.png` | Purple (#7F007F) |
+| UNKNOWN | `NaturalHazards/NH.01B.Flood.Unknown.png` | Grey (#777777) |
 
 > **Note**: These icons need to be created and added to the TAK-NZ iconset. As a fallback, use the existing `NaturalHazards/NH.01.Flood.png` icon with CoT colour overrides.
 
