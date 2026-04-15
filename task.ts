@@ -12,13 +12,13 @@ const FLOOD_ICON = `${ICONSET}:NaturalHazards/NH.01.Flood.png`;
 
 const SEVERITY_COLORS: Record<string, string> = {
     'NO_FLOODING': '#00FF00',
-    'ABOVE_NORMAL': '#FF8918',
+    'ABOVE_NORMAL': '#FF7700',
     'SEVERE': '#FF0000',
-    'EXTREME': '#800080',
-    'UNKNOWN': '#808080'
+    'EXTREME': '#7F007F',
+    'UNKNOWN': '#777777'
 };
 
-const FLASH_FLOOD_FILL = '#FF8918';
+const FLASH_FLOOD_FILL = '#FF7700';
 const SIGNIFICANT_EVENT_FILL = '#FF0000';
 const POLYGON_OPACITY = 0.4;
 const PAGE_SIZE = 10000;
@@ -518,7 +518,7 @@ export default class Task extends ETL {
                                 type: 'Feature',
                                 properties: {
                                     callsign: `Inundation: ${status.gaugeId} — ${map.mapType} ${level.level}`,
-                                    type: 'a-f-G-E-W-F',
+                                    type: 'a-f-X-i-m-f',
                                     stroke: fillColor, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                                     'fill-opacity': POLYGON_OPACITY, fill: fillColor
                                 },
@@ -544,7 +544,7 @@ export default class Task extends ETL {
                         type: 'Feature',
                         properties: {
                             callsign: `Flood Basin: ${displaySeverity(status.severity)}`,
-                            type: 'a-f-G-E-W-F',
+                            type: 'a-f-X-i-m-f',
                             stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                             'fill-opacity': POLYGON_OPACITY, fill: color,
                             remarks: this.buildGaugeRemarks(status, modelCache[status.gaugeId], forecastMap.get(status.gaugeId) || [])
@@ -571,7 +571,7 @@ export default class Task extends ETL {
                 type: 'Feature',
                 properties: {
                     callsign: `Flood Gauge — ${displaySeverity(status.severity)}${trendStr}`,
-                    type: 'a-f-G-E-W-F',
+                    type: 'a-f-X-i-m-f',
                     icon: FLOOD_ICON,
                     'marker-color': SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'],
                     time: status.issuedTime,
@@ -606,7 +606,7 @@ export default class Task extends ETL {
                         type: 'Feature',
                         properties: {
                             callsign: `Flash Flood: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
-                            type: 'a-f-G-E-W-F-F',
+                            type: 'a-f-X-i-m-f',
                             stroke: FLASH_FLOOD_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                             'fill-opacity': POLYGON_OPACITY, fill: FLASH_FLOOD_FILL,
                             remarks: [
@@ -649,7 +649,7 @@ export default class Task extends ETL {
                             type: 'Feature',
                             properties: {
                                 callsign: `Significant Flood Event: ${countries}`,
-                                type: 'a-f-G-E-W-F-S',
+                                type: 'a-f-X-i-m-f',
                                 stroke: SIGNIFICANT_EVENT_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                                 'fill-opacity': POLYGON_OPACITY, fill: SIGNIFICANT_EVENT_FILL,
                                 remarks: remarkLines.join('\n')
