@@ -1,7 +1,7 @@
 {
     "name": "etl-floodhub",
     "type": "module",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "description": "ETL to bring Google Flood Hub riverine flood forecasting data into TAK",
     "main": "index.js",
     "scripts": {
@@ -12,17 +12,18 @@
     "author": "Christian Elsen <chris@elsen.nz>",
     "license": "AGPL-3.0-only",
     "devDependencies": {
-        "@types/geojson": "^7946.0.10",
-        "eslint": "^9.28.0",
+        "@eslint/js": "^10.0.1",
+        "@types/geojson": "^7946.0.16",
+        "eslint": "^10.6.0",
         "ts-node": "^10.9.2",
-        "typescript": "^5.9.3",
-        "typescript-eslint": "^8.0.0"
+        "typescript": "^6.0.3",
+        "typescript-eslint": "^8.62.1"
     },
     "dependencies": {
-        "@sinclair/typebox": "^0.34.48",
-        "@tak-ps/etl": "^10.4.0"
+        "@sinclair/typebox": "^0.34.49",
+        "@tak-ps/etl": "^10.8.0"
     },
     "overrides": {
-        "fast-xml-parser": "5.5.12"
+        "fast-xml-parser": "5.9.3"
     }
 }
