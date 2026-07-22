@@ -520,7 +520,13 @@ export default class Task extends ETL {
                                     callsign: `Inundation: ${status.gaugeId} — ${map.mapType} ${level.level}`,
                                     type: 'a-f-X-i-m-f',
                                     stroke: fillColor, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
-                                    'fill-opacity': POLYGON_OPACITY, fill: fillColor
+                                    'fill-opacity': POLYGON_OPACITY, fill: fillColor,
+                                    metadata: {
+                                        type: 'inundation',
+                                        gaugeId: status.gaugeId,
+                                        mapType: map.mapType,
+                                        level: level.level
+                                    }
                                 },
                                 geometry: polys[pi]
                             });
@@ -547,7 +553,14 @@ export default class Task extends ETL {
                             type: 'a-f-X-i-m-f',
                             stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                             'fill-opacity': POLYGON_OPACITY, fill: color,
-                            remarks: this.buildGaugeRemarks(status, modelCache[status.gaugeId], forecastMap.get(status.gaugeId) || [])
+                            remarks: this.buildGaugeRemarks(status, modelCache[status.gaugeId], forecastMap.get(status.gaugeId) || []),
+                            metadata: {
+                                severity: status.severity,
+                                gaugeId: status.gaugeId,
+                                trend: status.forecastTrend,
+                                source: status.source,
+                                issuedTime: status.issuedTime
+                            }
                         },
                         geometry: polys[pi]
                     });
@@ -614,7 +627,13 @@ export default class Task extends ETL {
                                 `Countries: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
                                 `Forecast issued: ${ff.forecastIssueTime}`,
                                 `Forecast period: ${ff.forecastPeriodHours}h`
-                            ].join('\n')
+                            ].join('\n'),
+                            metadata: {
+                                type: 'flash_flood',
+                                countries: ff.affectedCountryCodes || [],
+                                forecastIssueTime: ff.forecastIssueTime,
+                                forecastPeriodHours: ff.forecastPeriodHours
+                            }
                         },
                         geometry: polys[pi]
                     });
@@ -652,7 +671,15 @@ export default class Task extends ETL {
                                 type: 'a-f-X-i-m-f',
                                 stroke: SIGNIFICANT_EVENT_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                                 'fill-opacity': POLYGON_OPACITY, fill: SIGNIFICANT_EVENT_FILL,
-                                remarks: remarkLines.join('\n')
+                                remarks: remarkLines.join('\n'),
+                                metadata: {
+                                    type: 'significant_event',
+                                    countries: evt.affectedCountryCodes || [],
+                                    startTime: evt.eventInterval?.startTime,
+                                    minimumEndTime: evt.eventInterval?.minimumEndTime,
+                                    affectedPopulation: evt.affectedPopulation,
+                                    areaKm2: evt.areaKm2
+                                }
                             },
                             geometry: polys[pi]
                         });
