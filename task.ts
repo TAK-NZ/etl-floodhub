@@ -22,6 +22,24 @@ const FLASH_FLOOD_FILL = '#FF7700';
 const SIGNIFICANT_EVENT_FILL = '#FF0000';
 const POLYGON_OPACITY = 0.4;
 const PAGE_SIZE = 10000;
+const LOWER_CONFIDENCE_OPACITY = 0.6;
+
+// Lead-time tiers reflect the fact that forecast skill decreases the further out a prediction is.
+// See: https://support.google.com/flood-hub/answer/15637389 and Google Research publications on
+// reliable predictive horizon (typically ~4-7 days depending on gauge/basin type).
+const LEAD_TIME_TIERS: Array<{ maxDays: number; label: string }> = [
+    { maxDays: 2, label: 'Warning' },   // 0-2 days out: highest confidence
+    { maxDays: 5, label: 'Watch' },     // 3-5 days out: moderate confidence
+    { maxDays: Infinity, label: 'Outlook' } // 6+ days out: lowest confidence, indicative only
+];
+
+function leadTimeTier(issuedTime: string, targetTime: string): { days: number; label: string } {
+    const issued = new Date(issuedTime).getTime();
+    const target = new Date(targetTime).getTime();
+    const days = Math.max(0, Math.round((target - issued) / 86400000));
+    const tier = LEAD_TIME_TIERS.find(t => days <= t.maxDays) || LEAD_TIME_TIERS[LEAD_TIME_TIERS.length - 1];
+    return { days, label: tier.label };
+}
 
 const Environment = Type.Object({
     'API_KEY': Type.String({
@@ -59,6 +77,10 @@ const Environment = Type.Object({
         default: 24,
         description: 'Hours between gauge discovery refreshes'
     }),
+    'MIN_CONFIRMING_ISSUANCES': Type.Number({
+        default: 2,
+        description: 'Minimum number of daily forecast issuances that must agree a threshold will be exceeded on a given date before it is treated as confirmed rather than preliminary. Helps avoid alerting on a single volatile forecast update, especially at longer lead times.'
+    }),
     'DEBUG': Type.Boolean({
         default: false,
         description: 'Log raw API responses'
@@ -71,7 +93,8 @@ const OutputSchema = Type.Object({
     trend: Type.Optional(Type.String({ description: 'Forecast trend direction (RISE, FALL, STEADY)' })),
     source: Type.String({ description: 'Gauge data source (e.g. HYBAS)' }),
     qualityVerified: Type.Boolean({ description: 'Whether the gauge is quality-verified' }),
-    issuedTime: Type.String({ description: 'Forecast issue time (ISO 8601)' })
+    issuedTimeUTC: Type.String({ description: 'Forecast issue time, raw ISO 8601 UTC' }),
+    issuedTimeLocal: Type.String({ description: 'Forecast issue time, human-formatted NZ local time' })
 });
 
 const EphemeralSchema = Type.Object({
@@ -92,10 +115,21 @@ const EphemeralSchema = Type.Object({
     })))
 });
 
+interface ValueChange {
+    lowerBound: number;
+    upperBound: number;
+}
+
+interface ForecastChange {
+    valueChange?: ValueChange;
+    referenceTimeRange?: { start: string; end: string };
+}
+
 interface FloodStatus {
     gaugeId: string;
     issuedTime: string;
     forecastTimeRange?: { start: string; end: string };
+    forecastChange?: ForecastChange;
     forecastTrend?: string;
     severity: Severity;
     source: string;
@@ -122,6 +156,21 @@ interface ForecastRange {
     forecastStartTime: string;
     forecastEndTime: string;
     value: number;
+}
+
+interface ForecastIssuance {
+    issuedTime: string;
+    forecastRanges: ForecastRange[];
+}
+
+// A forecast range for a target date, annotated with how many of the most recent daily
+// issuances agreed that a threshold-exceeding value would occur on that date.
+interface ConfirmedForecastRange extends ForecastRange {
+    severity: string;
+    leadDays: number;
+    leadLabel: string;
+    agreeingIssuances: number;
+    confirmed: boolean;
 }
 
 interface FlashFloodEvent {
@@ -166,6 +215,55 @@ function severityIndex(s: string): number {
 
 function displaySeverity(s: string): string {
     return s.replace(/_/g, ' ');
+}
+
+// TAK.NZ date/time normalization standard: NZ date/time components are derived via
+// Intl.DateTimeFormat with timeZone: 'Pacific/Auckland' so NZST/NZDT transitions are handled
+// automatically (never hardcode a +12/+13 offset — it will be wrong for half the year).
+const NZ_DATE_FORMAT = new Intl.DateTimeFormat('en-NZ', {
+    timeZone: 'Pacific/Auckland',
+    day: '2-digit', month: '2-digit', year: 'numeric'
+});
+const NZ_TIME_FORMAT = new Intl.DateTimeFormat('en-NZ', {
+    timeZone: 'Pacific/Auckland',
+    hour: '2-digit', minute: '2-digit', hour12: false
+});
+const NZ_TZ_NAME_FORMAT = new Intl.DateTimeFormat('en-NZ', {
+    timeZone: 'Pacific/Auckland',
+    timeZoneName: 'short'
+});
+
+// Relative time using floor (not round) so an event doesn't jump to the next unit a few
+// seconds after crossing into it (e.g. "1 hour ago" a moment after the event happened).
+function formatRelativeAgo(diffMs: number): string {
+    const absMs = Math.abs(diffMs);
+    const suffix = diffMs >= 0 ? 'ago' : 'from now';
+    const minutes = Math.floor(absMs / 60000);
+    const hours = Math.floor(absMs / 3600000);
+    const days = Math.floor(absMs / 86400000);
+    if (absMs < 3600000) return `${minutes} minute${minutes === 1 ? '' : 's'} ${suffix}`;
+    if (absMs < 86400000) return `${hours} hour${hours === 1 ? '' : 's'} ${suffix}`;
+    return `${days} day${days === 1 ? '' : 's'} ${suffix}`;
+}
+
+// Formats a raw ISO 8601 UTC timestamp into NZ local time: "DD/MM/YYYY, HH:mm <TZ> (<relative>)".
+function formatTimeLocal(isoTime: string): string {
+    const date = new Date(isoTime);
+    if (isNaN(date.getTime())) return isoTime;
+
+    const tzName = NZ_TZ_NAME_FORMAT.formatToParts(date).find(p => p.type === 'timeZoneName')?.value || 'NZT';
+    const ago = formatRelativeAgo(Date.now() - date.getTime());
+
+    return `${NZ_DATE_FORMAT.format(date)}, ${NZ_TIME_FORMAT.format(date)} ${tzName} (${ago})`;
+}
+
+// Returns the standard two "Time (UTC) / Time (NZ)" remarks lines for a raw ISO 8601 timestamp.
+// timeUTC is passed through unmodified (no 'Z' substitution) to stay strictly ISO 8601 parseable.
+function formatTimeLines(isoTime: string): string[] {
+    return [
+        `Time (UTC): ${isoTime}`,
+        `Time (NZ): ${formatTimeLocal(isoTime)}`
+    ];
 }
 
 function classifySeverity(value: number, model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number }): string {
@@ -271,8 +369,12 @@ export default class Task extends ETL {
         return { items, models };
     }
 
-    private async fetchForecasts(gaugeIds: string[], apiKey: string, debug: boolean): Promise<Map<string, ForecastRange[]>> {
-        const result = new Map<string, ForecastRange[]>();
+    // Fetches forecasts for the given gauges. Returns ALL issuances found within the lookback
+    // window (not just the latest), sorted ascending by issuedTime. Google reissues forecasts
+    // daily, so retaining prior issuances lets us check whether multiple issuances agree on a
+    // given future date before treating that prediction as confirmed (see buildConfirmedForecast).
+    private async fetchForecasts(gaugeIds: string[], apiKey: string, debug: boolean): Promise<Map<string, ForecastIssuance[]>> {
+        const result = new Map<string, ForecastIssuance[]>();
         if (gaugeIds.length === 0) return result;
 
         const now = new Date();
@@ -289,18 +391,14 @@ export default class Task extends ETL {
 
             try {
                 const data = await this.apiGet(`gauges:queryGaugeForecasts?${params.toString()}`, apiKey, debug) as {
-                    forecasts?: Record<string, { forecasts: Array<{ issuedTime: string; forecastRanges: ForecastRange[] }> }>;
+                    forecasts?: Record<string, { forecasts: ForecastIssuance[] }>;
                 };
                 if (data.forecasts) {
                     for (const [gaugeId, gaugeForecasts] of Object.entries(data.forecasts)) {
-                        // Use the most recent forecast (last by issuedTime)
-                        const sorted = (gaugeForecasts.forecasts || []).sort((a, b) =>
-                            (a.issuedTime || '').localeCompare(b.issuedTime || '')
-                        );
-                        const latest = sorted[sorted.length - 1];
-                        if (latest?.forecastRanges?.length) {
-                            result.set(gaugeId, latest.forecastRanges);
-                        }
+                        const issuances = (gaugeForecasts.forecasts || [])
+                            .filter(f => f.forecastRanges?.length)
+                            .sort((a, b) => (a.issuedTime || '').localeCompare(b.issuedTime || ''));
+                        if (issuances.length) result.set(gaugeId, issuances);
                     }
                 }
             } catch (err) {
@@ -308,6 +406,65 @@ export default class Task extends ETL {
             }
         }
         return result;
+    }
+
+    // Builds a confidence-annotated forecast table for the latest issuance, using prior
+    // issuances (Google reissues forecasts daily) as a substitute for our own state history.
+    // A target date's severity is only "confirmed" once at least `minConfirming` of the most
+    // recent issuances independently agree that severity (or worse) will occur on that date.
+    // This directly targets the "crying wolf" problem: a single volatile long-lead-time forecast
+    // spike won't be presented with full confidence until it holds up across multiple daily runs.
+    private buildConfirmedForecasts(
+        issuances: ForecastIssuance[],
+        model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number },
+        minConfirming: number
+    ): ConfirmedForecastRange[] {
+        if (issuances.length === 0) return [];
+        const latest = issuances[issuances.length - 1];
+        const priorIssuances = issuances.slice(0, -1);
+
+        return latest.forecastRanges.map(range => {
+            const targetDate = (range.forecastStartTime || range.forecastEndTime || '').split('T')[0];
+            const severity = classifySeverity(range.value, model);
+            const severityIdx = severityIndex(severity || 'NO_FLOODING');
+            const { days, label } = leadTimeTier(latest.issuedTime, range.forecastStartTime || range.forecastEndTime);
+
+            // Nothing elevated forecasted for this date — trivially "confirmed" (no alert to overhype).
+            if (!severity) {
+                return { ...range, severity, leadDays: days, leadLabel: label, agreeingIssuances: 1, confirmed: true };
+            }
+
+            let agreeingIssuances = 1; // the latest issuance itself
+            for (const prior of priorIssuances) {
+                const match = prior.forecastRanges.find(r =>
+                    (r.forecastStartTime || r.forecastEndTime || '').split('T')[0] === targetDate
+                );
+                if (!match) continue;
+                const priorSeverity = classifySeverity(match.value, model);
+                if (severityIndex(priorSeverity || 'NO_FLOODING') >= severityIdx) agreeingIssuances++;
+            }
+
+            return {
+                ...range,
+                severity,
+                leadDays: days,
+                leadLabel: label,
+                agreeingIssuances,
+                confirmed: agreeingIssuances >= minConfirming
+            };
+        });
+    }
+
+    // Determines whether the gauge's current headline severity is backed by a confirmed
+    // (multi-issuance-agreed) forecast entry, or whether it rests on a still-preliminary one.
+    // Gauges with no detailed forecast fetched (below FORECAST_DETAIL_THRESHOLD) have nothing to
+    // second-guess against, so they're treated as confirmed — there's no elevated claim to hedge.
+    private isSeverityConfirmed(status: FloodStatus, confirmedForecasts: ConfirmedForecastRange[]): boolean {
+        if (confirmedForecasts.length === 0) return true;
+        const statusIdx = severityIndex(status.severity);
+        const supportingEntries = confirmedForecasts.filter(f => severityIndex(f.severity || 'NO_FLOODING') >= statusIdx);
+        if (supportingEntries.length === 0) return true;
+        return supportingEntries.some(f => f.confirmed);
     }
 
     private async fetchFlashFloods(apiKey: string, debug: boolean): Promise<FlashFloodEvent[]> {
@@ -401,15 +558,28 @@ export default class Task extends ETL {
     private buildGaugeRemarks(
         status: FloodStatus,
         model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number; gaugeValueUnit: string } | undefined,
-        forecasts: ForecastRange[]
+        confirmedForecasts: ConfirmedForecastRange[],
+        isConfirmed: boolean,
+        minConfirming: number,
+        coveredBySignificantEvent: boolean
     ): string {
         const lines: string[] = [
             `Flood Gauge: ${status.gaugeId}`,
-            `Severity: ${displaySeverity(status.severity)}`,
+            `Severity: ${displaySeverity(status.severity)}${isConfirmed ? '' : ' (preliminary — pending confirmation)'}`,
             ...(status.forecastTrend ? [`Trend: ${status.forecastTrend}`] : []),
             `Source: ${status.source}`,
             `Quality: ${status.qualityVerified ? 'Verified' : 'Lower-confidence'}`
         ];
+
+        if (coveredBySignificantEvent) {
+            lines.push('Note: gauge is also covered by a Significant Flood Event (see event polygon for area-wide impact)');
+        }
+
+        if (status.forecastChange?.valueChange) {
+            const { lowerBound, upperBound } = status.forecastChange.valueChange;
+            const sign = (n: number) => (n >= 0 ? '+' : '');
+            lines.push(`Predicted change: ${sign(lowerBound)}${lowerBound}m to ${sign(upperBound)}${upperBound}m`);
+        }
 
         if (model) {
             lines.push('', 'Thresholds (m³/s):');
@@ -418,24 +588,21 @@ export default class Task extends ETL {
             lines.push(`  Extreme: ${model.extremeDangerLevel.toFixed(1)}`);
         }
 
-        if (forecasts.length > 0 && model) {
+        if (confirmedForecasts.length > 0 && model) {
             lines.push('', 'Forecast (m³/s):');
-            for (const f of forecasts) {
+            for (const f of confirmedForecasts) {
                 const date = (f.forecastStartTime || f.forecastEndTime || '').split('T')[0] || 'Unknown';
-                const sev = classifySeverity(f.value, model);
-                lines.push(`  ${date}: ${f.value.toFixed(1)}${sev ? ` ← ${displaySeverity(sev)}` : ''}`);
+                const sevLabel = f.severity ? ` ← ${displaySeverity(f.severity)}` : '';
+                const confidenceLabel = !f.severity
+                    ? ''
+                    : f.confirmed
+                        ? ' [confirmed]'
+                        : ` [preliminary, ${f.agreeingIssuances}/${minConfirming} issuances]`;
+                lines.push(`  ${date} (${f.leadLabel}, +${f.leadDays}d): ${f.value.toFixed(1)}${sevLabel}${confidenceLabel}`);
             }
         }
 
-        lines.push('', `Forecast issued: ${status.issuedTime.replace('Z', ' UTC')}`);
-        try {
-            const nzt = new Date(status.issuedTime).toLocaleString('en-NZ', {
-                timeZone: 'Pacific/Auckland',
-                day: 'numeric', month: 'short', year: 'numeric',
-                hour: 'numeric', minute: '2-digit', hour12: true
-            });
-            lines.push(`Forecast issued: ${nzt} NZT`);
-        } catch { /* ignore timezone errors */ }
+        lines.push('', 'Forecast issued:', ...formatTimeLines(status.issuedTime));
         return lines.join('\n');
     }
 
@@ -499,10 +666,27 @@ export default class Task extends ETL {
             .filter(s => severityIndex(s.severity) >= thresholdIdx && thresholdIdx >= 0)
             .map(s => s.gaugeId);
 
-        // Batch fetch forecasts for elevated gauges
+        // Batch fetch forecasts for elevated gauges. Each gauge maps to all issuances found in
+        // the lookback window (not just the latest) so severity can be confirmed against Google's
+        // own forecast reissuance history rather than state we'd otherwise have to persist ourselves.
         const forecastMap = await this.fetchForecasts(forecastGaugeIds, env.API_KEY, env.DEBUG);
         if (forecastGaugeIds.length > 0) {
             console.log(`Fetched forecasts for ${forecastMap.size}/${forecastGaugeIds.length} elevated gauges`);
+        }
+
+        // Fetch significant events up front (global endpoint, filter client-side) so gauge
+        // rendering below can de-emphasize gauges already covered by an area-wide event —
+        // Google's own guidance is that event-based alerting is more reliable than single-gauge
+        // alerting for the most severe cases (see support.google.com/flood-hub/answer/16364605).
+        let regionEvents: SignificantEvent[] = [];
+        const gaugeIdsInSignificantEvents = new Set<string>();
+        if (env.INCLUDE_SIGNIFICANT_EVENTS) {
+            const allEvents = await this.fetchSignificantEvents(env.API_KEY, env.DEBUG);
+            regionEvents = allEvents.filter(e => e.affectedCountryCodes?.includes(env.REGION_CODE));
+            console.log(`Fetched ${allEvents.length} significant events, ${regionEvents.length} in region`);
+            for (const evt of regionEvents) {
+                for (const gid of evt.gaugeIds || []) gaugeIdsInSignificantEvents.add(gid);
+            }
         }
 
         // Check for inundation maps
@@ -544,22 +728,32 @@ export default class Task extends ETL {
                 if (!status.serializedNotificationPolygonId) continue;
                 const polys = await this.fetchPolygons(status.serializedNotificationPolygonId, env.API_KEY, env.DEBUG);
                 const color = SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'];
+                const model = modelCache[status.gaugeId];
+                const confirmedForecasts = model
+                    ? this.buildConfirmedForecasts(forecastMap.get(status.gaugeId) || [], model, env.MIN_CONFIRMING_ISSUANCES)
+                    : [];
+                const isConfirmed = this.isSeverityConfirmed(status, confirmedForecasts);
+                const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
                 for (let pi = 0; pi < polys.length; pi++) {
                     features.push({
                         id: `floodhub-basin-${status.gaugeId}-${pi}`,
                         type: 'Feature',
                         properties: {
-                            callsign: `Flood Basin: ${displaySeverity(status.severity)}`,
+                            callsign: `Flood Basin: ${displaySeverity(status.severity)}${isConfirmed ? '' : ' (preliminary)'}`,
                             type: 'a-f-X-i-m-f',
                             stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
-                            'fill-opacity': POLYGON_OPACITY, fill: color,
-                            remarks: this.buildGaugeRemarks(status, modelCache[status.gaugeId], forecastMap.get(status.gaugeId) || []),
+                            'fill-opacity': isConfirmed ? POLYGON_OPACITY : POLYGON_OPACITY * 0.6, fill: color,
+                            remarks: this.buildGaugeRemarks(
+                                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent
+                            ),
                             metadata: {
                                 severity: status.severity,
                                 gaugeId: status.gaugeId,
                                 trend: status.forecastTrend,
                                 source: status.source,
-                                issuedTime: status.issuedTime
+                                issuedTimeUTC: status.issuedTime,
+                                issuedTimeLocal: formatTimeLocal(status.issuedTime),
+                                confirmed: isConfirmed
                             }
                         },
                         geometry: polys[pi]
@@ -575,25 +769,38 @@ export default class Task extends ETL {
             if (!status.gaugeLocation) continue;
             if (env.HIDE_NORMAL && status.severity === 'NO_FLOODING') continue;
             const model = modelCache[status.gaugeId];
-            const forecasts = forecastMap.get(status.gaugeId) || [];
-            const remarks = this.buildGaugeRemarks(status, model, forecasts);
+            const confirmedForecasts = model
+                ? this.buildConfirmedForecasts(forecastMap.get(status.gaugeId) || [], model, env.MIN_CONFIRMING_ISSUANCES)
+                : [];
+            const isConfirmed = this.isSeverityConfirmed(status, confirmedForecasts);
+            const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
+            const remarks = this.buildGaugeRemarks(
+                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent
+            );
             const trendStr = status.forecastTrend ? ` (${status.forecastTrend})` : '';
+            const preliminaryStr = isConfirmed ? '' : ' (preliminary)';
+            const eventStr = coveredBySignificantEvent ? ' [event]' : '';
 
             features.push({
                 id: `floodhub-${status.gaugeId}`,
                 type: 'Feature',
                 properties: {
-                    callsign: `Flood Gauge — ${displaySeverity(status.severity)}${trendStr}`,
+                    callsign: `Flood Gauge — ${displaySeverity(status.severity)}${trendStr}${preliminaryStr}${eventStr}`,
                     type: 'a-f-X-i-m-f',
                     icon: FLOOD_ICON,
                     'marker-color': SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'],
+                    // Lower-confidence (non-quality-verified) gauges are rendered more transparent
+                    // to visually distinguish them from higher-confidence gauges on the map.
+                    'marker-opacity': status.qualityVerified ? 1 : LOWER_CONFIDENCE_OPACITY,
                     time: status.issuedTime,
                     start: status.issuedTime,
                     stale: status.forecastTimeRange?.end || new Date(Date.now() + 24 * 3600000).toISOString(),
                     remarks,
                     metadata: {
                         gaugeId: status.gaugeId, severity: status.severity, trend: status.forecastTrend,
-                        source: status.source, qualityVerified: status.qualityVerified, issuedTime: status.issuedTime
+                        source: status.source, qualityVerified: status.qualityVerified,
+                        issuedTimeUTC: status.issuedTime, issuedTimeLocal: formatTimeLocal(status.issuedTime),
+                        confirmed: isConfirmed, coveredBySignificantEvent
                     }
                 },
                 geometry: {
@@ -625,13 +832,15 @@ export default class Task extends ETL {
                             remarks: [
                                 'Flash Flood Event',
                                 `Countries: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
-                                `Forecast issued: ${ff.forecastIssueTime}`,
+                                'Forecast issued:',
+                                ...formatTimeLines(ff.forecastIssueTime),
                                 `Forecast period: ${ff.forecastPeriodHours}h`
                             ].join('\n'),
                             metadata: {
                                 type: 'flash_flood',
                                 countries: ff.affectedCountryCodes || [],
-                                forecastIssueTime: ff.forecastIssueTime,
+                                forecastIssueTimeUTC: ff.forecastIssueTime,
+                                forecastIssueTimeLocal: formatTimeLocal(ff.forecastIssueTime),
                                 forecastPeriodHours: ff.forecastPeriodHours
                             }
                         },
@@ -641,19 +850,15 @@ export default class Task extends ETL {
             }
         }
 
-        // Significant events (global endpoint, filter client-side)
+        // Significant events (already fetched above so gauge rendering could cross-reference them)
         if (env.INCLUDE_SIGNIFICANT_EVENTS) {
-            const allEvents = await this.fetchSignificantEvents(env.API_KEY, env.DEBUG);
-            const regionEvents = allEvents.filter(e => e.affectedCountryCodes?.includes(env.REGION_CODE));
-            console.log(`Fetched ${allEvents.length} significant events, ${regionEvents.length} in region`);
-
             for (const evt of regionEvents) {
                 const countries = evt.affectedCountryCodes?.join(', ') || 'Unknown';
                 const remarkLines = [
                     'Significant Flood Event',
                     `Countries: ${countries}`,
-                    ...(evt.eventInterval?.startTime ? [`Start: ${evt.eventInterval.startTime}`] : []),
-                    ...(evt.eventInterval?.minimumEndTime ? [`Min end: ${evt.eventInterval.minimumEndTime}`] : []),
+                    ...(evt.eventInterval?.startTime ? ['Start:', ...formatTimeLines(evt.eventInterval.startTime)] : []),
+                    ...(evt.eventInterval?.minimumEndTime ? ['Min end:', ...formatTimeLines(evt.eventInterval.minimumEndTime)] : []),
                     ...(evt.affectedPopulation ? [`Affected Population: ${evt.affectedPopulation.toLocaleString()}`] : []),
                     ...(evt.areaKm2 ? [`Affected Area: ${evt.areaKm2.toFixed(1)} km²`] : []),
                     ...(evt.gaugeIds?.length ? [`Gauges: ${evt.gaugeIds.length}`] : [])
@@ -675,8 +880,10 @@ export default class Task extends ETL {
                                 metadata: {
                                     type: 'significant_event',
                                     countries: evt.affectedCountryCodes || [],
-                                    startTime: evt.eventInterval?.startTime,
-                                    minimumEndTime: evt.eventInterval?.minimumEndTime,
+                                    startTimeUTC: evt.eventInterval?.startTime,
+                                    startTimeLocal: evt.eventInterval?.startTime ? formatTimeLocal(evt.eventInterval.startTime) : undefined,
+                                    minimumEndTimeUTC: evt.eventInterval?.minimumEndTime,
+                                    minimumEndTimeLocal: evt.eventInterval?.minimumEndTime ? formatTimeLocal(evt.eventInterval.minimumEndTime) : undefined,
                                     affectedPopulation: evt.affectedPopulation,
                                     areaKm2: evt.areaKm2
                                 }
