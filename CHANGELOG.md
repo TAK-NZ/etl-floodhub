@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v1.0.4
+
+- Forecast confidence tiering: classify forecast days into Warning (0-2d), Watch (3-5d), and Outlook (6+d) lead-time tiers reflecting decreasing forecast skill at longer horizons
+- Confirm elevated severity by checking agreement across multiple daily forecast issuances instead of a single forecast run, reducing false alerts from volatile long-lead-time spikes ("crying wolf")
+- Mark unconfirmed/preliminary severity distinctly in callsign, remarks, and polygon fill opacity
+- Render lower-confidence (non-quality-verified) gauges with reduced marker opacity to visually distinguish them on the map
+- Cross-reference gauges already covered by a Significant Flood Event in remarks/callsign
+- Surface predicted change bounds (`forecastChange.valueChange`) in remarks when available
+- Normalize all surfaced timestamps: `metadata` now exposes separate `*UTC` (raw ISO 8601) and `*Local` (human-formatted, DST-aware) fields
+- Add configurable `TIMEZONE` environment variable (IANA name, default `Pacific/Auckland`) for local time display in remarks/metadata, replacing the previous hardcoded NZ timezone
+- Update dependencies to latest compatible versions
+
 ## v1.0.0
 
 - Initial release
