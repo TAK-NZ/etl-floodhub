@@ -49,6 +49,10 @@ const Environment = Type.Object({
         default: 'NZ',
         description: 'ISO 3166 alpha-2 country code for area search'
     }),
+    'TIMEZONE': Type.String({
+        default: 'Pacific/Auckland',
+        description: 'IANA timezone name used for local time display alongside UTC in remarks/metadata (e.g. Pacific/Auckland, Australia/Sydney)'
+    }),
     'INCLUDE_UNVERIFIED': Type.Boolean({
         default: false,
         description: 'Include lower-confidence (non-quality-verified) gauges'
@@ -94,7 +98,7 @@ const OutputSchema = Type.Object({
     source: Type.String({ description: 'Gauge data source (e.g. HYBAS)' }),
     qualityVerified: Type.Boolean({ description: 'Whether the gauge is quality-verified' }),
     issuedTimeUTC: Type.String({ description: 'Forecast issue time, raw ISO 8601 UTC' }),
-    issuedTimeLocal: Type.String({ description: 'Forecast issue time, human-formatted NZ local time' })
+    issuedTimeLocal: Type.String({ description: 'Forecast issue time, human-formatted local time (see TIMEZONE env var)' })
 });
 
 const EphemeralSchema = Type.Object({
@@ -217,21 +221,52 @@ function displaySeverity(s: string): string {
     return s.replace(/_/g, ' ');
 }
 
-// TAK.NZ date/time normalization standard: NZ date/time components are derived via
-// Intl.DateTimeFormat with timeZone: 'Pacific/Auckland' so NZST/NZDT transitions are handled
-// automatically (never hardcode a +12/+13 offset — it will be wrong for half the year).
-const NZ_DATE_FORMAT = new Intl.DateTimeFormat('en-NZ', {
-    timeZone: 'Pacific/Auckland',
-    day: '2-digit', month: '2-digit', year: 'numeric'
-});
-const NZ_TIME_FORMAT = new Intl.DateTimeFormat('en-NZ', {
-    timeZone: 'Pacific/Auckland',
-    hour: '2-digit', minute: '2-digit', hour12: false
-});
-const NZ_TZ_NAME_FORMAT = new Intl.DateTimeFormat('en-NZ', {
-    timeZone: 'Pacific/Auckland',
-    timeZoneName: 'short'
-});
+// TAK.NZ date/time normalization standard: local date/time components are derived via
+// Intl.DateTimeFormat with an IANA timeZone (configurable via the TIMEZONE env var, default
+// Pacific/Auckland) so daylight-saving transitions are handled automatically — never hardcode
+// a fixed UTC offset, it will be wrong for at least part of the year in DST-observing zones.
+const DEFAULT_TIMEZONE = 'Pacific/Auckland';
+
+interface TimezoneFormatters {
+    date: Intl.DateTimeFormat;
+    time: Intl.DateTimeFormat;
+    tzName: Intl.DateTimeFormat;
+    isoDate: Intl.DateTimeFormat;
+}
+
+// Intl.DateTimeFormat construction is relatively expensive and the same timezone is used
+// repeatedly across a single run, so formatters are built once per distinct timezone string.
+const formatterCache = new Map<string, TimezoneFormatters>();
+
+function buildFormatters(timezone: string): TimezoneFormatters {
+    return {
+        date: new Intl.DateTimeFormat('en-NZ', { timeZone: timezone, day: '2-digit', month: '2-digit', year: 'numeric' }),
+        time: new Intl.DateTimeFormat('en-NZ', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false }),
+        tzName: new Intl.DateTimeFormat('en-NZ', { timeZone: timezone, timeZoneName: 'short' }),
+        // en-CA gives YYYY-MM-DD ordering, used for local calendar dates in the forecast table
+        // (Google's forecast ranges are UTC-midnight-aligned, so the local calendar date can
+        // differ from the UTC one depending on the configured timezone's offset).
+        isoDate: new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' })
+    };
+}
+
+// Returns cached formatters for the given IANA timezone, falling back to DEFAULT_TIMEZONE (and
+// warning once) if the configured value is not a recognized timezone name.
+function getFormatters(timezone: string): TimezoneFormatters {
+    const cached = formatterCache.get(timezone);
+    if (cached) return cached;
+
+    let formatters: TimezoneFormatters;
+    try {
+        formatters = buildFormatters(timezone);
+    } catch (err) {
+        console.warn(`Invalid TIMEZONE "${timezone}", falling back to ${DEFAULT_TIMEZONE}:`, err);
+        formatters = timezone === DEFAULT_TIMEZONE ? buildFormatters('UTC') : getFormatters(DEFAULT_TIMEZONE);
+    }
+
+    formatterCache.set(timezone, formatters);
+    return formatters;
+}
 
 // Relative time using floor (not round) so an event doesn't jump to the next unit a few
 // seconds after crossing into it (e.g. "1 hour ago" a moment after the event happened).
@@ -246,23 +281,33 @@ function formatRelativeAgo(diffMs: number): string {
     return `${days} day${days === 1 ? '' : 's'} ${suffix}`;
 }
 
-// Formats a raw ISO 8601 UTC timestamp into NZ local time: "DD/MM/YYYY, HH:mm <TZ> (<relative>)".
-function formatTimeLocal(isoTime: string): string {
+// Formats a raw ISO 8601 UTC timestamp into configured-timezone local time:
+// "DD/MM/YYYY, HH:mm <TZ abbreviation> (<relative>)".
+function formatTimeLocal(isoTime: string, timezone: string): string {
     const date = new Date(isoTime);
     if (isNaN(date.getTime())) return isoTime;
 
-    const tzName = NZ_TZ_NAME_FORMAT.formatToParts(date).find(p => p.type === 'timeZoneName')?.value || 'NZT';
+    const { date: dateFmt, time: timeFmt, tzName: tzNameFmt } = getFormatters(timezone);
+    const tzName = tzNameFmt.formatToParts(date).find(p => p.type === 'timeZoneName')?.value || timezone;
     const ago = formatRelativeAgo(Date.now() - date.getTime());
 
-    return `${NZ_DATE_FORMAT.format(date)}, ${NZ_TIME_FORMAT.format(date)} ${tzName} (${ago})`;
+    return `${dateFmt.format(date)}, ${timeFmt.format(date)} ${tzName} (${ago})`;
 }
 
-// Returns the standard two "Time (UTC) / Time (NZ)" remarks lines for a raw ISO 8601 timestamp.
+// Converts a raw ISO 8601 UTC timestamp to its configured-timezone calendar date (YYYY-MM-DD),
+// so date-only display (e.g. the forecast table) reflects the day it falls on locally, not UTC.
+function toLocalDate(isoTime: string, timezone: string): string {
+    const date = new Date(isoTime);
+    if (isNaN(date.getTime())) return isoTime;
+    return getFormatters(timezone).isoDate.format(date);
+}
+
+// Returns the standard two "Time (UTC) / Time (Local)" remarks lines for a raw ISO 8601 timestamp.
 // timeUTC is passed through unmodified (no 'Z' substitution) to stay strictly ISO 8601 parseable.
-function formatTimeLines(isoTime: string): string[] {
+function formatTimeLines(isoTime: string, timezone: string): string[] {
     return [
         `Time (UTC): ${isoTime}`,
-        `Time (NZ): ${formatTimeLocal(isoTime)}`
+        `Time (Local): ${formatTimeLocal(isoTime, timezone)}`
     ];
 }
 
@@ -561,7 +606,8 @@ export default class Task extends ETL {
         confirmedForecasts: ConfirmedForecastRange[],
         isConfirmed: boolean,
         minConfirming: number,
-        coveredBySignificantEvent: boolean
+        coveredBySignificantEvent: boolean,
+        timezone: string
     ): string {
         const lines: string[] = [
             `Flood Gauge: ${status.gaugeId}`,
@@ -591,18 +637,19 @@ export default class Task extends ETL {
         if (confirmedForecasts.length > 0 && model) {
             lines.push('', 'Forecast (m³/s):');
             for (const f of confirmedForecasts) {
-                const date = (f.forecastStartTime || f.forecastEndTime || '').split('T')[0] || 'Unknown';
+                const targetTime = f.forecastStartTime || f.forecastEndTime;
+                const date = targetTime ? toLocalDate(targetTime, timezone) : 'Unknown';
                 const sevLabel = f.severity ? ` ← ${displaySeverity(f.severity)}` : '';
                 const confidenceLabel = !f.severity
                     ? ''
                     : f.confirmed
                         ? ' [confirmed]'
                         : ` [preliminary, ${f.agreeingIssuances}/${minConfirming} issuances]`;
-                lines.push(`  ${date} (${f.leadLabel}, +${f.leadDays}d): ${f.value.toFixed(1)}${sevLabel}${confidenceLabel}`);
+                lines.push(`  ${date} local (${f.leadLabel}, +${f.leadDays}d): ${f.value.toFixed(1)}${sevLabel}${confidenceLabel}`);
             }
         }
 
-        lines.push('', 'Forecast issued:', ...formatTimeLines(status.issuedTime));
+        lines.push('', 'Forecast issued:', ...formatTimeLines(status.issuedTime, timezone));
         return lines.join('\n');
     }
 
@@ -744,7 +791,7 @@ export default class Task extends ETL {
                             stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                             'fill-opacity': isConfirmed ? POLYGON_OPACITY : POLYGON_OPACITY * 0.6, fill: color,
                             remarks: this.buildGaugeRemarks(
-                                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent
+                                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent, env.TIMEZONE
                             ),
                             metadata: {
                                 severity: status.severity,
@@ -752,7 +799,7 @@ export default class Task extends ETL {
                                 trend: status.forecastTrend,
                                 source: status.source,
                                 issuedTimeUTC: status.issuedTime,
-                                issuedTimeLocal: formatTimeLocal(status.issuedTime),
+                                issuedTimeLocal: formatTimeLocal(status.issuedTime, env.TIMEZONE),
                                 confirmed: isConfirmed
                             }
                         },
@@ -775,7 +822,7 @@ export default class Task extends ETL {
             const isConfirmed = this.isSeverityConfirmed(status, confirmedForecasts);
             const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
             const remarks = this.buildGaugeRemarks(
-                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent
+                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent, env.TIMEZONE
             );
             const trendStr = status.forecastTrend ? ` (${status.forecastTrend})` : '';
             const preliminaryStr = isConfirmed ? '' : ' (preliminary)';
@@ -799,7 +846,7 @@ export default class Task extends ETL {
                     metadata: {
                         gaugeId: status.gaugeId, severity: status.severity, trend: status.forecastTrend,
                         source: status.source, qualityVerified: status.qualityVerified,
-                        issuedTimeUTC: status.issuedTime, issuedTimeLocal: formatTimeLocal(status.issuedTime),
+                        issuedTimeUTC: status.issuedTime, issuedTimeLocal: formatTimeLocal(status.issuedTime, env.TIMEZONE),
                         confirmed: isConfirmed, coveredBySignificantEvent
                     }
                 },
@@ -833,14 +880,14 @@ export default class Task extends ETL {
                                 'Flash Flood Event',
                                 `Countries: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
                                 'Forecast issued:',
-                                ...formatTimeLines(ff.forecastIssueTime),
+                                ...formatTimeLines(ff.forecastIssueTime, env.TIMEZONE),
                                 `Forecast period: ${ff.forecastPeriodHours}h`
                             ].join('\n'),
                             metadata: {
                                 type: 'flash_flood',
                                 countries: ff.affectedCountryCodes || [],
                                 forecastIssueTimeUTC: ff.forecastIssueTime,
-                                forecastIssueTimeLocal: formatTimeLocal(ff.forecastIssueTime),
+                                forecastIssueTimeLocal: formatTimeLocal(ff.forecastIssueTime, env.TIMEZONE),
                                 forecastPeriodHours: ff.forecastPeriodHours
                             }
                         },
@@ -857,8 +904,8 @@ export default class Task extends ETL {
                 const remarkLines = [
                     'Significant Flood Event',
                     `Countries: ${countries}`,
-                    ...(evt.eventInterval?.startTime ? ['Start:', ...formatTimeLines(evt.eventInterval.startTime)] : []),
-                    ...(evt.eventInterval?.minimumEndTime ? ['Min end:', ...formatTimeLines(evt.eventInterval.minimumEndTime)] : []),
+                    ...(evt.eventInterval?.startTime ? ['Start:', ...formatTimeLines(evt.eventInterval.startTime, env.TIMEZONE)] : []),
+                    ...(evt.eventInterval?.minimumEndTime ? ['Min end:', ...formatTimeLines(evt.eventInterval.minimumEndTime, env.TIMEZONE)] : []),
                     ...(evt.affectedPopulation ? [`Affected Population: ${evt.affectedPopulation.toLocaleString()}`] : []),
                     ...(evt.areaKm2 ? [`Affected Area: ${evt.areaKm2.toFixed(1)} km²`] : []),
                     ...(evt.gaugeIds?.length ? [`Gauges: ${evt.gaugeIds.length}`] : [])
@@ -881,9 +928,9 @@ export default class Task extends ETL {
                                     type: 'significant_event',
                                     countries: evt.affectedCountryCodes || [],
                                     startTimeUTC: evt.eventInterval?.startTime,
-                                    startTimeLocal: evt.eventInterval?.startTime ? formatTimeLocal(evt.eventInterval.startTime) : undefined,
+                                    startTimeLocal: evt.eventInterval?.startTime ? formatTimeLocal(evt.eventInterval.startTime, env.TIMEZONE) : undefined,
                                     minimumEndTimeUTC: evt.eventInterval?.minimumEndTime,
-                                    minimumEndTimeLocal: evt.eventInterval?.minimumEndTime ? formatTimeLocal(evt.eventInterval.minimumEndTime) : undefined,
+                                    minimumEndTimeLocal: evt.eventInterval?.minimumEndTime ? formatTimeLocal(evt.eventInterval.minimumEndTime, env.TIMEZONE) : undefined,
                                     affectedPopulation: evt.affectedPopulation,
                                     areaKm2: evt.areaKm2
                                 }
