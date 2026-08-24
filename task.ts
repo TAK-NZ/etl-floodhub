@@ -71,7 +71,7 @@ const Environment = Type.Object({
     }),
     'INCLUDE_SIGNIFICANT_EVENTS': Type.Boolean({
         default: true,
-        description: 'Poll for significant high-impact events'
+        description: 'Poll for significant high-impact events (area-wide flood events clustered from gauge discharge predictions exceeding danger thresholds, weighted by affected population/area) and render their impact polygons. Also cross-references covered gauges, tagging them [event] in callsign/remarks.'
     }),
     'FORECAST_DETAIL_THRESHOLD': Type.String({
         default: 'ABOVE_NORMAL',
@@ -85,6 +85,10 @@ const Environment = Type.Object({
         default: 2,
         description: 'Minimum number of daily forecast issuances that must agree a threshold will be exceeded on a given date before it is treated as confirmed rather than preliminary. Helps avoid alerting on a single volatile forecast update, especially at longer lead times.'
     }),
+    'INCLUDE_PRELIMINARY_EVENTS': Type.Boolean({
+        default: true,
+        description: 'Include gauges and basin polygons whose elevated severity is still preliminary (not yet confirmed across MIN_CONFIRMING_ISSUANCES forecast issuances). Set to false to suppress unconfirmed alerts entirely, reducing false positives at the cost of later notice.'
+    }),
     'DEBUG': Type.Boolean({
         default: false,
         description: 'Log raw API responses'
@@ -97,6 +101,7 @@ const OutputSchema = Type.Object({
     trend: Type.Optional(Type.String({ description: 'Forecast trend direction (RISE, FALL, STEADY)' })),
     source: Type.String({ description: 'Gauge data source (e.g. HYBAS)' }),
     qualityVerified: Type.Boolean({ description: 'Whether the gauge is quality-verified' }),
+    preliminary: Type.Boolean({ description: 'True if the severity is still preliminary and has not yet been confirmed across multiple forecast issuances (see MIN_CONFIRMING_ISSUANCES)' }),
     issuedTimeUTC: Type.String({ description: 'Forecast issue time, raw ISO 8601 UTC' }),
     issuedTimeLocal: Type.String({ description: 'Forecast issue time, human-formatted local time (see TIMEZONE env var)' })
 });
@@ -780,6 +785,7 @@ export default class Task extends ETL {
                     ? this.buildConfirmedForecasts(forecastMap.get(status.gaugeId) || [], model, env.MIN_CONFIRMING_ISSUANCES)
                     : [];
                 const isConfirmed = this.isSeverityConfirmed(status, confirmedForecasts);
+                if (!isConfirmed && !env.INCLUDE_PRELIMINARY_EVENTS) continue;
                 const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
                 for (let pi = 0; pi < polys.length; pi++) {
                     features.push({
@@ -800,7 +806,7 @@ export default class Task extends ETL {
                                 source: status.source,
                                 issuedTimeUTC: status.issuedTime,
                                 issuedTimeLocal: formatTimeLocal(status.issuedTime, env.TIMEZONE),
-                                confirmed: isConfirmed
+                                confirmed: isConfirmed, preliminary: !isConfirmed
                             }
                         },
                         geometry: polys[pi]
@@ -820,6 +826,7 @@ export default class Task extends ETL {
                 ? this.buildConfirmedForecasts(forecastMap.get(status.gaugeId) || [], model, env.MIN_CONFIRMING_ISSUANCES)
                 : [];
             const isConfirmed = this.isSeverityConfirmed(status, confirmedForecasts);
+            if (!isConfirmed && !env.INCLUDE_PRELIMINARY_EVENTS) continue;
             const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
             const remarks = this.buildGaugeRemarks(
                 status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent, env.TIMEZONE
@@ -847,7 +854,7 @@ export default class Task extends ETL {
                         gaugeId: status.gaugeId, severity: status.severity, trend: status.forecastTrend,
                         source: status.source, qualityVerified: status.qualityVerified,
                         issuedTimeUTC: status.issuedTime, issuedTimeLocal: formatTimeLocal(status.issuedTime, env.TIMEZONE),
-                        confirmed: isConfirmed, coveredBySignificantEvent
+                        confirmed: isConfirmed, preliminary: !isConfirmed, coveredBySignificantEvent
                     }
                 },
                 geometry: {
