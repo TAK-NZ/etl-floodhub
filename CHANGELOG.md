@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v1.0.5
+
+- Add `INCLUDE_PRELIMINARY_EVENTS` environment variable (default `true`) to optionally suppress gauges/basin polygons whose elevated severity is still preliminary (not yet confirmed across `MIN_CONFIRMING_ISSUANCES` forecast issuances)
+- Add `preliminary` field to the output schema and gauge/basin metadata, alongside the existing `confirmed` field
+- Expand the `INCLUDE_SIGNIFICANT_EVENTS` description to explain what a significant event is and what the flag controls
+- Checked all dependencies against latest available versions; already up to date (`typescript` remains pinned at 6.0.3 pending `typescript-eslint` TypeScript 7 support)
+
 ## v1.0.4
 
 - Forecast confidence tiering: classify forecast days into Warning (0-2d), Watch (3-5d), and Outlook (6+d) lead-time tiers reflecting decreasing forecast skill at longer horizons
