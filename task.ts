@@ -81,14 +81,6 @@ const Environment = Type.Object({
         default: 24,
         description: 'Hours between gauge discovery refreshes'
     }),
-    'MIN_CONFIRMING_ISSUANCES': Type.Number({
-        default: 2,
-        description: 'Minimum number of daily forecast issuances that must agree a threshold will be exceeded on a given date before it is treated as confirmed rather than preliminary. Helps avoid alerting on a single volatile forecast update, especially at longer lead times.'
-    }),
-    'INCLUDE_PRELIMINARY_EVENTS': Type.Boolean({
-        default: true,
-        description: 'Include gauges and basin polygons whose elevated severity is still preliminary (not yet confirmed across MIN_CONFIRMING_ISSUANCES forecast issuances). Set to false to suppress unconfirmed alerts entirely, reducing false positives at the cost of later notice.'
-    }),
     'DEBUG': Type.Boolean({
         default: false,
         description: 'Log raw API responses'
@@ -101,7 +93,8 @@ const OutputSchema = Type.Object({
     trend: Type.Optional(Type.String({ description: 'Forecast trend direction (RISE, FALL, STEADY)' })),
     source: Type.String({ description: 'Gauge data source (e.g. HYBAS)' }),
     qualityVerified: Type.Boolean({ description: 'Whether the gauge is quality-verified' }),
-    preliminary: Type.Boolean({ description: 'True if the severity is still preliminary and has not yet been confirmed across multiple forecast issuances (see MIN_CONFIRMING_ISSUANCES)' }),
+    leadTimeDays: Type.Optional(Type.Number({ description: 'Days between forecast issue time and the start of the forecast time range the headline severity refers to' })),
+    leadTimeTier: Type.Optional(Type.String({ description: 'Confidence tier for the headline severity based on lead time: Warning (0-2d), Watch (3-5d), or Outlook (6+d). Forecast skill decreases at longer lead times.' })),
     issuedTimeUTC: Type.String({ description: 'Forecast issue time, raw ISO 8601 UTC' }),
     issuedTimeLocal: Type.String({ description: 'Forecast issue time, human-formatted local time (see TIMEZONE env var)' })
 });
@@ -172,14 +165,12 @@ interface ForecastIssuance {
     forecastRanges: ForecastRange[];
 }
 
-// A forecast range for a target date, annotated with how many of the most recent daily
-// issuances agreed that a threshold-exceeding value would occur on that date.
-interface ConfirmedForecastRange extends ForecastRange {
+// A forecast range annotated with its derived severity and the lead-time confidence tier
+// implied by how far ahead of the issue time it falls.
+interface TieredForecastRange extends ForecastRange {
     severity: string;
     leadDays: number;
     leadLabel: string;
-    agreeingIssuances: number;
-    confirmed: boolean;
 }
 
 interface FlashFloodEvent {
@@ -419,12 +410,11 @@ export default class Task extends ETL {
         return { items, models };
     }
 
-    // Fetches forecasts for the given gauges. Returns ALL issuances found within the lookback
-    // window (not just the latest), sorted ascending by issuedTime. Google reissues forecasts
-    // daily, so retaining prior issuances lets us check whether multiple issuances agree on a
-    // given future date before treating that prediction as confirmed (see buildConfirmedForecast).
-    private async fetchForecasts(gaugeIds: string[], apiKey: string, debug: boolean): Promise<Map<string, ForecastIssuance[]>> {
-        const result = new Map<string, ForecastIssuance[]>();
+    // Fetches the most recent forecast issuance for each of the given gauges. The issuedTime is
+    // retained alongside the ranges so lead times (and therefore confidence tiers) can be
+    // derived per forecast day — see buildTieredForecasts.
+    private async fetchForecasts(gaugeIds: string[], apiKey: string, debug: boolean): Promise<Map<string, ForecastIssuance>> {
+        const result = new Map<string, ForecastIssuance>();
         if (gaugeIds.length === 0) return result;
 
         const now = new Date();
@@ -448,7 +438,8 @@ export default class Task extends ETL {
                         const issuances = (gaugeForecasts.forecasts || [])
                             .filter(f => f.forecastRanges?.length)
                             .sort((a, b) => (a.issuedTime || '').localeCompare(b.issuedTime || ''));
-                        if (issuances.length) result.set(gaugeId, issuances);
+                        const latest = issuances[issuances.length - 1];
+                        if (latest) result.set(gaugeId, latest);
                     }
                 }
             } catch (err) {
@@ -458,63 +449,21 @@ export default class Task extends ETL {
         return result;
     }
 
-    // Builds a confidence-annotated forecast table for the latest issuance, using prior
-    // issuances (Google reissues forecasts daily) as a substitute for our own state history.
-    // A target date's severity is only "confirmed" once at least `minConfirming` of the most
-    // recent issuances independently agree that severity (or worse) will occur on that date.
-    // This directly targets the "crying wolf" problem: a single volatile long-lead-time forecast
-    // spike won't be presented with full confidence until it holds up across multiple daily runs.
-    private buildConfirmedForecasts(
-        issuances: ForecastIssuance[],
-        model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number },
-        minConfirming: number
-    ): ConfirmedForecastRange[] {
-        if (issuances.length === 0) return [];
-        const latest = issuances[issuances.length - 1];
-        const priorIssuances = issuances.slice(0, -1);
+    // Annotates each forecast range in an issuance with its derived severity and the lead-time
+    // confidence tier implied by how far ahead of the issue time it falls. Google's published
+    // model-skill data shows forecast reliability decreasing with lead time, so the tier is what
+    // conveys how much weight a given forecast day deserves.
+    private buildTieredForecasts(
+        issuance: ForecastIssuance | undefined,
+        model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number }
+    ): TieredForecastRange[] {
+        if (!issuance) return [];
 
-        return latest.forecastRanges.map(range => {
-            const targetDate = (range.forecastStartTime || range.forecastEndTime || '').split('T')[0];
+        return issuance.forecastRanges.map(range => {
             const severity = classifySeverity(range.value, model);
-            const severityIdx = severityIndex(severity || 'NO_FLOODING');
-            const { days, label } = leadTimeTier(latest.issuedTime, range.forecastStartTime || range.forecastEndTime);
-
-            // Nothing elevated forecasted for this date — trivially "confirmed" (no alert to overhype).
-            if (!severity) {
-                return { ...range, severity, leadDays: days, leadLabel: label, agreeingIssuances: 1, confirmed: true };
-            }
-
-            let agreeingIssuances = 1; // the latest issuance itself
-            for (const prior of priorIssuances) {
-                const match = prior.forecastRanges.find(r =>
-                    (r.forecastStartTime || r.forecastEndTime || '').split('T')[0] === targetDate
-                );
-                if (!match) continue;
-                const priorSeverity = classifySeverity(match.value, model);
-                if (severityIndex(priorSeverity || 'NO_FLOODING') >= severityIdx) agreeingIssuances++;
-            }
-
-            return {
-                ...range,
-                severity,
-                leadDays: days,
-                leadLabel: label,
-                agreeingIssuances,
-                confirmed: agreeingIssuances >= minConfirming
-            };
+            const { days, label } = leadTimeTier(issuance.issuedTime, range.forecastStartTime || range.forecastEndTime);
+            return { ...range, severity, leadDays: days, leadLabel: label };
         });
-    }
-
-    // Determines whether the gauge's current headline severity is backed by a confirmed
-    // (multi-issuance-agreed) forecast entry, or whether it rests on a still-preliminary one.
-    // Gauges with no detailed forecast fetched (below FORECAST_DETAIL_THRESHOLD) have nothing to
-    // second-guess against, so they're treated as confirmed — there's no elevated claim to hedge.
-    private isSeverityConfirmed(status: FloodStatus, confirmedForecasts: ConfirmedForecastRange[]): boolean {
-        if (confirmedForecasts.length === 0) return true;
-        const statusIdx = severityIndex(status.severity);
-        const supportingEntries = confirmedForecasts.filter(f => severityIndex(f.severity || 'NO_FLOODING') >= statusIdx);
-        if (supportingEntries.length === 0) return true;
-        return supportingEntries.some(f => f.confirmed);
     }
 
     private async fetchFlashFloods(apiKey: string, debug: boolean): Promise<FlashFloodEvent[]> {
@@ -608,15 +557,15 @@ export default class Task extends ETL {
     private buildGaugeRemarks(
         status: FloodStatus,
         model: { warningLevel: number; dangerLevel: number; extremeDangerLevel: number; gaugeValueUnit: string } | undefined,
-        confirmedForecasts: ConfirmedForecastRange[],
-        isConfirmed: boolean,
-        minConfirming: number,
+        tieredForecasts: TieredForecastRange[],
+        headlineLeadTime: { days: number; label: string } | undefined,
         coveredBySignificantEvent: boolean,
         timezone: string
     ): string {
         const lines: string[] = [
             `Flood Gauge: ${status.gaugeId}`,
-            `Severity: ${displaySeverity(status.severity)}${isConfirmed ? '' : ' (preliminary — pending confirmation)'}`,
+            `Severity: ${displaySeverity(status.severity)}`,
+            ...(headlineLeadTime ? [`Confidence: ${headlineLeadTime.label} (+${headlineLeadTime.days}d lead time)`] : []),
             ...(status.forecastTrend ? [`Trend: ${status.forecastTrend}`] : []),
             `Source: ${status.source}`,
             `Quality: ${status.qualityVerified ? 'Verified' : 'Lower-confidence'}`
@@ -639,18 +588,13 @@ export default class Task extends ETL {
             lines.push(`  Extreme: ${model.extremeDangerLevel.toFixed(1)}`);
         }
 
-        if (confirmedForecasts.length > 0 && model) {
+        if (tieredForecasts.length > 0 && model) {
             lines.push('', 'Forecast (m³/s):');
-            for (const f of confirmedForecasts) {
+            for (const f of tieredForecasts) {
                 const targetTime = f.forecastStartTime || f.forecastEndTime;
                 const date = targetTime ? toLocalDate(targetTime, timezone) : 'Unknown';
                 const sevLabel = f.severity ? ` ← ${displaySeverity(f.severity)}` : '';
-                const confidenceLabel = !f.severity
-                    ? ''
-                    : f.confirmed
-                        ? ' [confirmed]'
-                        : ` [preliminary, ${f.agreeingIssuances}/${minConfirming} issuances]`;
-                lines.push(`  ${date} local (${f.leadLabel}, +${f.leadDays}d): ${f.value.toFixed(1)}${sevLabel}${confidenceLabel}`);
+                lines.push(`  ${date} local (${f.leadLabel}, +${f.leadDays}d): ${f.value.toFixed(1)}${sevLabel}`);
             }
         }
 
@@ -781,23 +725,24 @@ export default class Task extends ETL {
                 const polys = await this.fetchPolygons(status.serializedNotificationPolygonId, env.API_KEY, env.DEBUG);
                 const color = SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'];
                 const model = modelCache[status.gaugeId];
-                const confirmedForecasts = model
-                    ? this.buildConfirmedForecasts(forecastMap.get(status.gaugeId) || [], model, env.MIN_CONFIRMING_ISSUANCES)
+                const tieredForecasts = model
+                    ? this.buildTieredForecasts(forecastMap.get(status.gaugeId), model)
                     : [];
-                const isConfirmed = this.isSeverityConfirmed(status, confirmedForecasts);
-                if (!isConfirmed && !env.INCLUDE_PRELIMINARY_EVENTS) continue;
                 const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
+                const headlineLeadTime = status.forecastTimeRange?.start
+                    ? leadTimeTier(status.issuedTime, status.forecastTimeRange.start)
+                    : undefined;
                 for (let pi = 0; pi < polys.length; pi++) {
                     features.push({
                         id: `floodhub-basin-${status.gaugeId}-${pi}`,
                         type: 'Feature',
                         properties: {
-                            callsign: `Flood Basin: ${displaySeverity(status.severity)}${isConfirmed ? '' : ' (preliminary)'}`,
+                            callsign: `Flood Basin: ${displaySeverity(status.severity)}`,
                             type: 'a-f-X-i-m-f',
                             stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
-                            'fill-opacity': isConfirmed ? POLYGON_OPACITY : POLYGON_OPACITY * 0.6, fill: color,
+                            'fill-opacity': POLYGON_OPACITY, fill: color,
                             remarks: this.buildGaugeRemarks(
-                                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent, env.TIMEZONE
+                                status, model, tieredForecasts, headlineLeadTime, coveredBySignificantEvent, env.TIMEZONE
                             ),
                             metadata: {
                                 severity: status.severity,
@@ -806,7 +751,7 @@ export default class Task extends ETL {
                                 source: status.source,
                                 issuedTimeUTC: status.issuedTime,
                                 issuedTimeLocal: formatTimeLocal(status.issuedTime, env.TIMEZONE),
-                                confirmed: isConfirmed, preliminary: !isConfirmed
+                                leadTimeDays: headlineLeadTime?.days, leadTimeTier: headlineLeadTime?.label
                             }
                         },
                         geometry: polys[pi]
@@ -822,24 +767,25 @@ export default class Task extends ETL {
             if (!status.gaugeLocation) continue;
             if (env.HIDE_NORMAL && status.severity === 'NO_FLOODING') continue;
             const model = modelCache[status.gaugeId];
-            const confirmedForecasts = model
-                ? this.buildConfirmedForecasts(forecastMap.get(status.gaugeId) || [], model, env.MIN_CONFIRMING_ISSUANCES)
+            const tieredForecasts = model
+                ? this.buildTieredForecasts(forecastMap.get(status.gaugeId), model)
                 : [];
-            const isConfirmed = this.isSeverityConfirmed(status, confirmedForecasts);
-            if (!isConfirmed && !env.INCLUDE_PRELIMINARY_EVENTS) continue;
             const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
+            const headlineLeadTime = status.forecastTimeRange?.start
+                ? leadTimeTier(status.issuedTime, status.forecastTimeRange.start)
+                : undefined;
             const remarks = this.buildGaugeRemarks(
-                status, model, confirmedForecasts, isConfirmed, env.MIN_CONFIRMING_ISSUANCES, coveredBySignificantEvent, env.TIMEZONE
+                status, model, tieredForecasts, headlineLeadTime, coveredBySignificantEvent, env.TIMEZONE
             );
             const trendStr = status.forecastTrend ? ` (${status.forecastTrend})` : '';
-            const preliminaryStr = isConfirmed ? '' : ' (preliminary)';
+            const tierStr = headlineLeadTime ? ` [${headlineLeadTime.label}]` : '';
             const eventStr = coveredBySignificantEvent ? ' [event]' : '';
 
             features.push({
                 id: `floodhub-${status.gaugeId}`,
                 type: 'Feature',
                 properties: {
-                    callsign: `Flood Gauge — ${displaySeverity(status.severity)}${trendStr}${preliminaryStr}${eventStr}`,
+                    callsign: `Flood Gauge — ${displaySeverity(status.severity)}${trendStr}${tierStr}${eventStr}`,
                     type: 'a-f-X-i-m-f',
                     icon: FLOOD_ICON,
                     'marker-color': SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'],
@@ -854,7 +800,8 @@ export default class Task extends ETL {
                         gaugeId: status.gaugeId, severity: status.severity, trend: status.forecastTrend,
                         source: status.source, qualityVerified: status.qualityVerified,
                         issuedTimeUTC: status.issuedTime, issuedTimeLocal: formatTimeLocal(status.issuedTime, env.TIMEZONE),
-                        confirmed: isConfirmed, preliminary: !isConfirmed, coveredBySignificantEvent
+                        coveredBySignificantEvent,
+                        leadTimeDays: headlineLeadTime?.days, leadTimeTier: headlineLeadTime?.label
                     }
                 },
                 geometry: {
