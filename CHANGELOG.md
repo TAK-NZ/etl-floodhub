@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## v1.0.6
+
+- Expose forecast confidence tiering in metadata: `leadTimeDays` and `leadTimeTier` (Warning/Watch/Outlook) are now available on gauge and basin features, and added to the output schema
+- Show the headline severity's confidence tier in remarks (`Confidence: Watch (+4d lead time)`) and tag it in the gauge callsign (e.g. `[Watch]`)
+- **Breaking:** simplify confidence handling to rely solely on lead-time tiering, which directly reflects Google's published model-skill data. Removes the multi-issuance confirmation mechanism added in v1.0.4/v1.0.5 — the `MIN_CONFIRMING_ISSUANCES` and `INCLUDE_PRELIMINARY_EVENTS` environment variables, the `confirmed` and `preliminary` metadata/schema fields, and the `(preliminary)` callsign/remarks labels and reduced polygon opacity. It duplicated what lead-time tiering already conveys, and had the least forecast history to work with at exactly the short lead times where alerts matter most
+- Forecast fetching now retains only the latest issuance per gauge rather than all issuances in a 7-day window, reducing per-run memory use
+
 ## v1.0.5
 
 - Add `INCLUDE_PRELIMINARY_EVENTS` environment variable (default `true`) to optionally suppress gauges/basin polygons whose elevated severity is still preliminary (not yet confirmed across `MIN_CONFIRMING_ISSUANCES` forecast issuances)
