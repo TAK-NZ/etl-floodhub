@@ -1,7 +1,7 @@
 {
     "name": "etl-floodhub",
     "type": "module",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "description": "ETL to bring Google Flood Hub riverine flood forecasting data into TAK",
     "main": "index.js",
     "scripts": {
