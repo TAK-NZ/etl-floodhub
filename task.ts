@@ -217,6 +217,18 @@ function displaySeverity(s: string): string {
     return s.replace(/_/g, ' ');
 }
 
+// Maps GaugeValueUnit (https://developers.google.com/flood-forecasting/rest/v1/gaugeModels)
+// to a display unit for thresholds/forecasts. Most gauges use discharge (m³/s), but some
+// (e.g. gauges using agency-set water levels, common in India/Bangladesh/Brazil) use meters —
+// hardcoding "m³/s" would mislabel those.
+function displayGaugeValueUnit(unit: string): string {
+    switch (unit) {
+        case 'METERS': return 'm';
+        case 'CUBIC_METERS_PER_SECOND': return 'm³/s';
+        default: return unit;
+    }
+}
+
 // TAK.NZ date/time normalization standard: local date/time components are derived via
 // Intl.DateTimeFormat with an IANA timeZone (configurable via the TIMEZONE env var, default
 // Pacific/Auckland) so daylight-saving transitions are handled automatically — never hardcode
@@ -410,11 +422,13 @@ export default class Task extends ETL {
         return { items, models };
     }
 
-    // Fetches the most recent forecast issuance for each of the given gauges. The issuedTime is
-    // retained alongside the ranges so lead times (and therefore confidence tiers) can be
-    // derived per forecast day — see buildTieredForecasts.
-    private async fetchForecasts(gaugeIds: string[], apiKey: string, debug: boolean): Promise<Map<string, ForecastIssuance>> {
-        const result = new Map<string, ForecastIssuance>();
+    // Fetches forecast issuances for each of the given gauges, sorted ascending by issuedTime.
+    // All issuances in the lookback window are retained (not just the newest) because
+    // floodStatus lags behind queryGaugeForecasts: the severity we render is derived from a
+    // specific issuance, and we must pair it with that same issuance's numbers rather than
+    // whichever happens to be newest. See selectMatchingIssuance.
+    private async fetchForecasts(gaugeIds: string[], apiKey: string, debug: boolean): Promise<Map<string, ForecastIssuance[]>> {
+        const result = new Map<string, ForecastIssuance[]>();
         if (gaugeIds.length === 0) return result;
 
         const now = new Date();
@@ -438,8 +452,7 @@ export default class Task extends ETL {
                         const issuances = (gaugeForecasts.forecasts || [])
                             .filter(f => f.forecastRanges?.length)
                             .sort((a, b) => (a.issuedTime || '').localeCompare(b.issuedTime || ''));
-                        const latest = issuances[issuances.length - 1];
-                        if (latest) result.set(gaugeId, latest);
+                        if (issuances.length) result.set(gaugeId, issuances);
                     }
                 }
             } catch (err) {
@@ -447,6 +460,34 @@ export default class Task extends ETL {
             }
         }
         return result;
+    }
+
+    // Picks the forecast issuance that a given flood status was derived from, so severity, the
+    // confidence tier and the forecast table all describe one forecast run.
+    //
+    // This matters because floodStatus:searchLatestFloodStatusByArea and
+    // gauges:queryGaugeForecasts advance independently. Taking whichever forecast issuance is
+    // newest can pair an older status severity with revised numbers, producing self-contradictory
+    // output — e.g. an EXTREME headline above a table whose peak sits below the warning
+    // threshold, because Google revised that day's forecast down between the two issuances.
+    //
+    // Selection is by nearest issuedTime. In practice status.issuedTime matches a forecast
+    // issuedTime exactly (212/215 elevated NZ gauges when this was measured), and nearest
+    // resolves to that exact issuance. When no exact match exists the status was derived from an
+    // issuance the API does not return, and the temporally closest one is the best available
+    // stand-in — notably better than clamping to "not newer", which can reach back many hours to
+    // an unrelated issuance and reintroduce the contradiction it was meant to prevent.
+    private selectMatchingIssuance(issuances: ForecastIssuance[], statusIssuedTime: string): ForecastIssuance | undefined {
+        if (!issuances.length) return undefined;
+
+        const target = Date.parse(statusIssuedTime);
+        if (isNaN(target)) return issuances[issuances.length - 1];
+
+        return issuances.reduce((best, candidate) =>
+            Math.abs(Date.parse(candidate.issuedTime) - target) < Math.abs(Date.parse(best.issuedTime) - target)
+                ? candidate
+                : best
+        );
     }
 
     // Annotates each forecast range in an issuance with its derived severity and the lead-time
@@ -560,7 +601,8 @@ export default class Task extends ETL {
         tieredForecasts: TieredForecastRange[],
         headlineLeadTime: { days: number; label: string } | undefined,
         coveredBySignificantEvent: boolean,
-        timezone: string
+        timezone: string,
+        forecastIssuedTime: string | undefined
     ): string {
         const lines: string[] = [
             `Flood Gauge: ${status.gaugeId}`,
@@ -582,14 +624,21 @@ export default class Task extends ETL {
         }
 
         if (model) {
-            lines.push('', 'Thresholds (m³/s):');
+            const unit = displayGaugeValueUnit(model.gaugeValueUnit);
+            lines.push('', `Thresholds (${unit}):`);
             lines.push(`  Warning: ${model.warningLevel.toFixed(1)}`);
             lines.push(`  Danger: ${model.dangerLevel.toFixed(1)}`);
             lines.push(`  Extreme: ${model.extremeDangerLevel.toFixed(1)}`);
         }
 
         if (tieredForecasts.length > 0 && model) {
-            lines.push('', 'Forecast (m³/s):');
+            lines.push('', `Forecast (${displayGaugeValueUnit(model.gaugeValueUnit)}):`);
+            // Normally the table comes from the same issuance the severity was derived from. If
+            // the API did not return that issuance we fall back to the nearest one, so surface
+            // that rather than letting the numbers silently disagree with the headline severity.
+            if (forecastIssuedTime && forecastIssuedTime !== status.issuedTime) {
+                lines.push(`  Note: from a different forecast issuance (${forecastIssuedTime})`);
+            }
             for (const f of tieredForecasts) {
                 const targetTime = f.forecastStartTime || f.forecastEndTime;
                 const date = targetTime ? toLocalDate(targetTime, timezone) : 'Unknown';
@@ -725,8 +774,9 @@ export default class Task extends ETL {
                 const polys = await this.fetchPolygons(status.serializedNotificationPolygonId, env.API_KEY, env.DEBUG);
                 const color = SEVERITY_COLORS[status.severity] || SEVERITY_COLORS['UNKNOWN'];
                 const model = modelCache[status.gaugeId];
+                const matchedIssuance = this.selectMatchingIssuance(forecastMap.get(status.gaugeId) || [], status.issuedTime);
                 const tieredForecasts = model
-                    ? this.buildTieredForecasts(forecastMap.get(status.gaugeId), model)
+                    ? this.buildTieredForecasts(matchedIssuance, model)
                     : [];
                 const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
                 const headlineLeadTime = status.forecastTimeRange?.start
@@ -742,7 +792,8 @@ export default class Task extends ETL {
                             stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                             'fill-opacity': POLYGON_OPACITY, fill: color,
                             remarks: this.buildGaugeRemarks(
-                                status, model, tieredForecasts, headlineLeadTime, coveredBySignificantEvent, env.TIMEZONE
+                                status, model, tieredForecasts, headlineLeadTime, coveredBySignificantEvent, env.TIMEZONE,
+                                matchedIssuance?.issuedTime
                             ),
                             metadata: {
                                 severity: status.severity,
@@ -767,15 +818,17 @@ export default class Task extends ETL {
             if (!status.gaugeLocation) continue;
             if (env.HIDE_NORMAL && status.severity === 'NO_FLOODING') continue;
             const model = modelCache[status.gaugeId];
+            const matchedIssuance = this.selectMatchingIssuance(forecastMap.get(status.gaugeId) || [], status.issuedTime);
             const tieredForecasts = model
-                ? this.buildTieredForecasts(forecastMap.get(status.gaugeId), model)
+                ? this.buildTieredForecasts(matchedIssuance, model)
                 : [];
             const coveredBySignificantEvent = gaugeIdsInSignificantEvents.has(status.gaugeId);
             const headlineLeadTime = status.forecastTimeRange?.start
                 ? leadTimeTier(status.issuedTime, status.forecastTimeRange.start)
                 : undefined;
             const remarks = this.buildGaugeRemarks(
-                status, model, tieredForecasts, headlineLeadTime, coveredBySignificantEvent, env.TIMEZONE
+                status, model, tieredForecasts, headlineLeadTime, coveredBySignificantEvent, env.TIMEZONE,
+                matchedIssuance?.issuedTime
             );
             const trendStr = status.forecastTrend ? ` (${status.forecastTrend})` : '';
             const tierStr = headlineLeadTime ? ` [${headlineLeadTime.label}]` : '';
