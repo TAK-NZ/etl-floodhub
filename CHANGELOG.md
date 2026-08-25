@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v1.0.8
+
+- Fix gauge features mixing data from two different forecast issuances. `floodStatus` and `queryGaugeForecasts` advance independently, so pairing the status severity with whichever forecast issuance was newest could render an EXTREME headline above a forecast table whose peak sat below the warning threshold — after Google had revised that day's forecast downward. The forecast issuance is now selected by nearest `issuedTime` to the status, so severity, confidence tier and the forecast table all describe the same forecast run
+- Add a note in remarks when the forecast table comes from a different issuance than the severity, for the small number of cases where the API does not return the exact issuance the status was derived from (3 of 215 elevated NZ gauges when measured)
+- Fix `Thresholds`/`Forecast` remarks always labelling values as `m³/s`, regardless of the gauge model's actual `gaugeValueUnit`. Some gauges (e.g. those using agency-set water levels in India/Bangladesh/Brazil) report in meters, not discharge — the unit label is now derived from the API response
+
 ## v1.0.6
 
 - Expose forecast confidence tiering in metadata: `leadTimeDays` and `leadTimeTier` (Warning/Watch/Outlook) are now available on gauge and basin features, and added to the output schema
