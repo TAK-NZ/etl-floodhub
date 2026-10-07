@@ -9,6 +9,7 @@
 - Use `Task.init()` for the local and Lambda entry points. No change in Lambda behaviour, `ETL_TOKEN` is always provided there
 - Require Node 24 (`engines` `>= 24`), and use Node 24 in the deploy workflow, matching the Lambda base image and lint workflow
 - Update dependencies within their existing ranges: `@tak-ps/etl` 10.22.2, `eslint` 10.12.0, `typescript-eslint` 8.71.1 and `tsx` 4.23.15. `npm audit` now reports 0 vulnerabilities (7 before). `typescript` stays on 6.0.3 as `typescript-eslint` still limits supported versions to below 6.1.0
+- Add a `.dockerignore` so `.git`, `.github`, `node_modules`, `dist`, `test`, `docs`, `.agents`, `.env*` and markdown files are kept out of the image build context. `capabilities.json`, `task.ts`, `package*.json` and `tsconfig.json` stay in the context
 - Make `EphemeralState` a type alias instead of an interface so it satisfies the `Record<string, unknown>` parameter of `setEphemeral()` in `@tak-ps/etl` 10.22. Type-only change, no runtime difference
 
 ## v1.0.8
