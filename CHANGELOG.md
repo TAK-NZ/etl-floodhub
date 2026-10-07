@@ -11,6 +11,8 @@
 - Update dependencies within their existing ranges: `@tak-ps/etl` 10.22.2, `eslint` 10.12.0, `typescript-eslint` 8.71.1 and `tsx` 4.23.15. `npm audit` now reports 0 vulnerabilities (7 before). `typescript` stays on 6.0.3 as `typescript-eslint` still limits supported versions to below 6.1.0
 - Add a `.dockerignore` so `.git`, `.github`, `node_modules`, `dist`, `test`, `docs`, `.agents`, `.env*` and markdown files are kept out of the image build context. `capabilities.json`, `task.ts`, `package*.json` and `tsconfig.json` stay in the context
 - Make `EphemeralState` a type alias instead of an interface so it satisfies the `Record<string, unknown>` parameter of `setEphemeral()` in `@tak-ps/etl` 10.22. Type-only change, no runtime difference
+- Update GitHub Actions to releases that run on Node.js 24, clearing the Node.js 20 deprecation warnings: `actions/checkout` v7, `actions/setup-node` v7, `aws-actions/configure-aws-credentials` v6 and `docker/setup-buildx-action` v4. `aws-actions/amazon-ecr-login` v2 already runs on Node.js 24. Not yet run in CI on these versions
+- Pin the workflow runners to `ubuntu-24.04` instead of `ubuntu-latest`, so the `ubuntu-latest` migration to Ubuntu 26 (starting October 19, 2026) does not change the build environment unannounced
 
 ## v1.0.8
 
