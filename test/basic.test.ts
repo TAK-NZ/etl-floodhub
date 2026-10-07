@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { SchemaType, DataFlowType, InvocationType, StaticCapabilities, isValidPermission } from '@tak-ps/etl';
+import { SchemaType, DataFlowType, InvocationType, StaticCapabilities, PERMISSIONS } from '@tak-ps/etl';
 
 // task.ts calls Task.init() at module scope which requires an ETL environment,
 // so these must be set before the dynamic import below
@@ -94,7 +94,10 @@ test('capabilities.json is a valid manifest matching the task', async () => {
     assert.equal(doc.name, 'Google Flood Hub');
     assert.ok(doc.permissions.length > 0);
     for (const permission of doc.permissions) {
-        assert.ok(isValidPermission(permission.resource), `Invalid permission: ${permission.resource}`);
+        // Resources are expressed as <permission>:<level>, where <level> may be a wildcard
+        const [name, level] = permission.resource.split(':');
+        assert.ok(PERMISSIONS[name], `Unknown permission: ${permission.resource}`);
+        assert.ok(level === '*' || PERMISSIONS[name].includes(level), `Unknown permission level: ${permission.resource}`);
     }
     assert.equal(doc.invocations.incoming?.schedule?.default.schedule, 'rate(2 minutes)');
 });

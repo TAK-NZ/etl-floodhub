@@ -191,13 +191,13 @@ interface SignificantEvent {
     gaugeIds?: string[];
 }
 
-interface EphemeralState {
+type EphemeralState = {
     gauges?: {
         lastRefresh: string;
         items: Record<string, { lat: number; lon: number; source: string; qualityVerified: boolean }>;
     };
     models?: Record<string, { warningLevel: number; dangerLevel: number; extremeDangerLevel: number; gaugeValueUnit: string }>;
-}
+};
 
 type PolygonGeometry = { type: 'Polygon'; coordinates: number[][][] };
 
