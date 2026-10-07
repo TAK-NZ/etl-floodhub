@@ -319,6 +319,10 @@ Deployment into the CloudTAK environment for ETL tasks is done via automatic rel
 Github actions will build and push docker releases on every version tag which can then be automatically configured via the
 CloudTAK API.
 
+The image is built with `docker buildx` and embeds [`capabilities.json`](capabilities.json) (the task's CloudTAK capabilities
+manifest: required permissions, compute settings and default schedule) as the `com.cloudtak.capabilities` OCI annotation, so
+CloudTAK can read it directly from the container registry.
+
 ### GitHub Actions Setup
 
 The workflow uses GitHub variables and secrets to make it reusable across different ETL repositories.
@@ -392,6 +396,13 @@ ts-node task.ts
 ```
 npm run build
 node dist/task.js
+```
+
+To lint and run the test suite:
+
+```
+npm run lint
+npm test
 ```
 
 ### Configuration Examples
