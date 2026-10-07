@@ -1,0 +1,27 @@
+{
+    "version": "1.0",
+    "name": "Google Flood Hub",
+    "description": "Ingests river gauge flood status and forecasts, flash flood events and significant flood events from the Google Flood Forecasting API for a configured region and posts them to the map as colour-coded gauge points and impact polygons.",
+    "compute": {
+        "memory": 1024,
+        "timeout": 120
+    },
+    "permissions": [
+        {
+            "resource": "feature:submit",
+            "required": true,
+            "description": "Submits river gauge points and flash flood / significant event polygons to CloudTAK"
+        }
+    ],
+    "invocations": {
+        "incoming": {
+            "schedule": {
+                "description": "Polls the Google Flood Forecasting API for updated gauge flood status, flash floods and significant events on a schedule.",
+                "default": {
+                    "enabled": true,
+                    "schedule": "rate(2 minutes)"
+                }
+            }
+        }
+    }
+}

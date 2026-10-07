@@ -191,13 +191,13 @@ interface SignificantEvent {
     gaugeIds?: string[];
 }
 
-interface EphemeralState {
+type EphemeralState = {
     gauges?: {
         lastRefresh: string;
         items: Record<string, { lat: number; lon: number; source: string; qualityVerified: boolean }>;
     };
     models?: Record<string, { warningLevel: number; dangerLevel: number; extremeDangerLevel: number; gaugeValueUnit: string }>;
-}
+};
 
 type PolygonGeometry = { type: 'Polygon'; coordinates: number[][][] };
 
@@ -955,7 +955,7 @@ export default class Task extends ETL {
     }
 }
 
-await local(new Task(import.meta.url), import.meta.url);
+await local(await Task.init(import.meta.url), import.meta.url);
 export async function handler(event: Event = {}) {
-    return await internal(new Task(import.meta.url), event);
+    return await internal(await Task.init(import.meta.url), event);
 }

@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## v1.1.0
+
+- Add a `capabilities.json` manifest so CloudTAK can read the task's requirements from the image (TAK-NZ/CloudTAK#165). It declares a single required permission, `feature:submit` (the only CloudTAK API the task uses is `submit()`), 1024 MB memory / 120 s timeout, and a default `rate(2 minutes)` schedule. It is validated against `StaticCapabilitiesSchema` from `@tak-ps/etl`, and a test guards it in CI
+- Build and push the image with `docker buildx` in the demo and production deploy jobs, embedding `capabilities.json` as the `com.cloudtak.capabilities` OCI annotation, with `docker/setup-buildx-action@v3` providing the `docker-container` builder the annotation needs. The annotation was checked locally against a throwaway registry; it has not been checked in the demo environment
+- Deliberately NOT adopting the `cloudtak-etl` CLI from `@tak-ps/etl` for the build and push: its `bin/build.ts` hardcodes the destination ECR repository as `tak-vpc-<Environment>-cloudtak-tasks`, which does not match the `<stackname>-etltasks` repository used by TAK.NZ base-infra. The existing lookup of the repository through the `EcrEtlTasksRepoArn` CloudFormation export is kept unchanged
+- Add a basic test suite (`npm test`, `node:test` run through `tsx`) covering the task's static config, input and output schemas and the manifest; the `lint` script now also covers `test/`
+- Use `Task.init()` for the local and Lambda entry points. No change in Lambda behaviour, `ETL_TOKEN` is always provided there
+- Require Node 24 (`engines` `>= 24`), and use Node 24 in the deploy workflow, matching the Lambda base image and lint workflow
+- Update dependencies within their existing ranges: `@tak-ps/etl` 10.22.2, `eslint` 10.12.0, `typescript-eslint` 8.71.1 and `tsx` 4.23.15. `npm audit` now reports 0 vulnerabilities (7 before). `typescript` stays on 6.0.3 as `typescript-eslint` still limits supported versions to below 6.1.0
+- Add a `.dockerignore` so `.git`, `.github`, `node_modules`, `dist`, `test`, `docs`, `.agents`, `.env*` and markdown files are kept out of the image build context. `capabilities.json`, `task.ts`, `package*.json` and `tsconfig.json` stay in the context
+- Make `EphemeralState` a type alias instead of an interface so it satisfies the `Record<string, unknown>` parameter of `setEphemeral()` in `@tak-ps/etl` 10.22. Type-only change, no runtime difference
+
 ## v1.0.8
 
 - Fix gauge features mixing data from two different forecast issuances. `floodStatus` and `queryGaugeForecasts` advance independently, so pairing the status severity with whichever forecast issuance was newest could render an EXTREME headline above a forecast table whose peak sat below the warning threshold — after Google had revised that day's forecast downward. The forecast issuance is now selected by nearest `issuedTime` to the status, so severity, confidence tier and the forecast table all describe the same forecast run
