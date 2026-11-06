@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v1.1.1
+
+- Prepare for Google Flood Hub's semi-distributed riverine model (expected late November 2026), which renames gauges from `hybas_<id>` to `subhybas_<id>`, may move gauges between low and high confidence, and only provides data for the new gauges from the launch date. The ETL treats gauge IDs as opaque, so it follows the rename without configuration, but the CoT UIDs (`floodhub-<gaugeId>`) change with it
+- Refresh the gauge cache early when more than 25% of the current flood status gauges have no cached model, at most once an hour. Thresholds are cached per gauge ID, so after the rename the Thresholds and Forecast sections of the remarks would otherwise be empty for up to `GAUGE_REFRESH_HOURS` (24 h by default). Behaviour is unchanged while the gauge IDs match the cache
+- Document the model change in the README and make the `gaugeId` output schema description mention both ID formats
+- Update dependencies within their ranges: `@tak-ps/etl` 10.26.0, `eslint` 10.14.0 and `typescript-eslint` 8.72.1, and raise the ranges in `package.json` to match. `npm audit` reports 0 vulnerabilities (17 before: 3 high in `undici`, fixed by the update, and 14 moderate caused by `minimatch` in the lint toolchain, GHSA-g3hv-75wg-m249, fixed by the override below)
+- Replace the `fast-xml-parser` override with a `minimatch` override (`^11.0.1`), the first patched version. `eslint`, `typescript-eslint` and `@tak-ps/etl` depend on `minimatch` 10.x or earlier 11.x, so the override can go once they require a patched release. `fast-xml-parser` is no longer in the dependency tree
+- Not updated: `@tak-ps/etl` 11.0.0, which changes the published output schema format and is meant for CloudTAK v14, and `typescript` 7.0.2, which `typescript-eslint` does not support yet (it requires below 6.1.0)
+
 ## v1.1.0
 
 - Add a `capabilities.json` manifest so CloudTAK can read the task's requirements from the image (TAK-NZ/CloudTAK#165). It declares a single required permission, `feature:submit` (the only CloudTAK API the task uses is `submit()`), 1024 MB memory / 120 s timeout, and a default `rate(2 minutes)` schedule. It is validated against `StaticCapabilitiesSchema` from `@tak-ps/etl`, and a test guards it in CI
