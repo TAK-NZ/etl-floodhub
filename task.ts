@@ -24,6 +24,11 @@ const POLYGON_OPACITY = 0.4;
 const PAGE_SIZE = 10000;
 const LOWER_CONFIDENCE_OPACITY = 0.6;
 
+// Early gauge cache refresh (see shouldRefreshForMissingModels): triggered when more than this
+// share of current flood status gauges have no cached model, at most once per interval.
+const MODEL_REFRESH_MISSING_RATIO = 0.25;
+const MODEL_REFRESH_MIN_INTERVAL_MS = 3600000;
+
 // Lead-time tiers reflect the fact that forecast skill decreases the further out a prediction is.
 // See: https://support.google.com/flood-hub/answer/15637389 and Google Research publications on
 // reliable predictive horizon (typically ~4-7 days depending on gauge/basin type).
@@ -88,7 +93,7 @@ const Environment = Type.Object({
 });
 
 const OutputSchema = Type.Object({
-    gaugeId: Type.String({ description: 'Unique gauge identifier (e.g. hybas_5120615530)' }),
+    gaugeId: Type.String({ description: 'Unique gauge identifier (e.g. hybas_5120615530, or subhybas_5120615530 for the semi-distributed model)' }),
     severity: Type.String({ description: 'Flood severity level (NO FLOODING, ABOVE NORMAL, SEVERE, EXTREME, UNKNOWN)' }),
     trend: Type.Optional(Type.String({ description: 'Forecast trend direction (RISE, FALL, STEADY)' })),
     source: Type.String({ description: 'Gauge data source (e.g. HYBAS)' }),
@@ -422,6 +427,40 @@ export default class Task extends ETL {
         return { items, models };
     }
 
+    // Re-runs gauge discovery and stores the result. A failure is non-fatal and leaves the
+    // previous cache (if any) in place.
+    private async refreshGaugeCache(
+        env: { REGION_CODE: string; INCLUDE_UNVERIFIED: boolean; API_KEY: string; DEBUG: boolean },
+        ephemeral: EphemeralState,
+        now: Date
+    ): Promise<void> {
+        console.log('Refreshing gauge discovery...');
+        try {
+            const { items, models } = await this.refreshGauges(env);
+            ephemeral.gauges = { lastRefresh: now.toISOString(), items };
+            ephemeral.models = models;
+            await this.setEphemeral(ephemeral);
+        } catch (err) {
+            console.warn('Gauge discovery failed (non-fatal):', err);
+        }
+    }
+
+    // True when enough of the current flood status gauges have no cached model that the cache is
+    // probably stale (e.g. upstream renamed the gauge IDs). Limited to one early refresh per
+    // MODEL_REFRESH_MIN_INTERVAL_MS, measured from the last refresh, so a region where many
+    // gauges permanently lack a model cannot trigger a full discovery on every run.
+    private shouldRefreshForMissingModels(
+        gaugeIds: string[],
+        models: Record<string, unknown>,
+        lastRefresh: string,
+        now: Date
+    ): boolean {
+        if (gaugeIds.length === 0) return false;
+        if (now.getTime() - new Date(lastRefresh).getTime() < MODEL_REFRESH_MIN_INTERVAL_MS) return false;
+        const missing = gaugeIds.filter(id => !(id in models)).length;
+        return missing / gaugeIds.length > MODEL_REFRESH_MISSING_RATIO;
+    }
+
     // Fetches forecast issuances for each of the given gauges, sorted ascending by issuedTime.
     // All issuances in the lookback window are retained (not just the newest) because
     // floodStatus lags behind queryGaugeForecasts: the severity we render is derived from a
@@ -668,20 +707,7 @@ export default class Task extends ETL {
         const needsRefresh = !ephemeral.gauges?.lastRefresh ||
             (now.getTime() - new Date(ephemeral.gauges.lastRefresh).getTime()) > env.GAUGE_REFRESH_HOURS * 3600000;
 
-        if (needsRefresh) {
-            console.log('Refreshing gauge discovery...');
-            try {
-                const { items, models } = await this.refreshGauges(env);
-                ephemeral.gauges = { lastRefresh: now.toISOString(), items };
-                ephemeral.models = models;
-                await this.setEphemeral(ephemeral);
-            } catch (err) {
-                console.warn('Gauge discovery failed (non-fatal):', err);
-            }
-        }
-
-        const gaugeCache = ephemeral.gauges?.items || {};
-        const modelCache = ephemeral.models || {};
+        if (needsRefresh) await this.refreshGaugeCache(env, ephemeral, now);
 
         // Fetch flood status with pagination and includeNonQualityVerified
         const statusBody = {
@@ -692,6 +718,20 @@ export default class Task extends ETL {
             'floodStatus:searchLatestFloodStatusByArea', statusBody, env.API_KEY, env.DEBUG, 'floodStatuses'
         );
         console.log(`Fetched ${statuses.length} flood statuses`);
+
+        // Gauge IDs can be renamed upstream (Flood Hub is moving from hybas_* to subhybas_*
+        // gauges), which leaves the cached thresholds keyed by IDs that no longer exist. Without
+        // them the Thresholds and Forecast sections disappear from remarks until the next
+        // scheduled refresh, so refresh early when too many current gauges have no cached model.
+        if (!needsRefresh && ephemeral.gauges?.lastRefresh && this.shouldRefreshForMissingModels(
+            statuses.map(s => s.gaugeId), ephemeral.models || {}, ephemeral.gauges.lastRefresh, now
+        )) {
+            console.log('Many gauges have no cached model, refreshing gauge discovery early...');
+            await this.refreshGaugeCache(env, ephemeral, now);
+        }
+
+        const gaugeCache = ephemeral.gauges?.items || {};
+        const modelCache = ephemeral.models || {};
 
         // Update gauge cache with locations from flood status (gauge discovery may not have them)
         for (const s of statuses) {

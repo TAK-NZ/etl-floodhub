@@ -42,6 +42,17 @@ The forecasting system is described in [Nearing et al. (2024) "Global prediction
 - Forecast reliability degrades with lead time — days 1-2 are most reliable, days 6-7 less so
 - The model performs better in humid climates and smaller basins (favourable for NZ)
 
+### Semi-distributed Model Change (late November 2026)
+
+Google is replacing the lumped riverine model with a semi-distributed one, which divides each basin into smaller areas. The ETL needs no configuration change, but operators will see:
+
+- **New gauge IDs.** The numeric part stays the same and a `sub` prefix is added, so `hybas_5120615530` becomes `subhybas_5120615530`. The ETL treats gauge IDs as opaque strings, so it follows the change, but the CoT UIDs (`floodhub-<gaugeId>`) change too. Markers for the old gauges are not updated again and expire at their stale time
+- **Changed gauge confidence.** Some gauges move between low and high confidence (`qualityVerified`). With `INCLUDE_UNVERIFIED` off, some gauges will therefore appear or disappear
+- **No old data.** Data for the new gauges is available from the launch date onwards, and data for the old gauges is no longer available
+- **Early cache refresh.** Thresholds are cached per gauge ID. If more than 25% of the current gauges have no cached thresholds, the ETL refreshes gauge discovery early (at most once an hour) instead of waiting for `GAUGE_REFRESH_HOURS`, so the thresholds and forecast table are back within one poll of the change
+
+The example IDs and `source` values in this document come from the previous model.
+
 ## Severity Model
 
 The API provides a pre-computed `severity` field per gauge based on forecast values vs. model thresholds:
@@ -101,7 +112,7 @@ Each gauge model defines three thresholds in cubic metres per second (m³/s):
 | `INCLUDE_FLASH_FLOODS` | `true` | Poll for flash flood events and render polygons |
 | `INCLUDE_SIGNIFICANT_EVENTS` | `true` | Poll for significant high-impact events |
 | `FORECAST_DETAIL_THRESHOLD` | `ABOVE_NORMAL` | Minimum severity to fetch detailed 8-day forecast (NO_FLOODING, ABOVE_NORMAL, SEVERE, EXTREME) |
-| `GAUGE_REFRESH_HOURS` | `24` | Hours between gauge discovery refreshes |
+| `GAUGE_REFRESH_HOURS` | `24` | Hours between gauge discovery refreshes. A refresh also runs early (at most hourly) when over 25% of current gauges have no cached thresholds |
 | `DEBUG` | `false` | Log raw API responses |
 
 ## CoT Mapping
@@ -456,7 +467,7 @@ The HydroBASINS catchment polygons visible in the FloodHub web UI are **not avai
 - Inundation maps (only during active flooding at supported gauges)
 - Significant event areas
 
-To display basin boundaries, the [HydroBASINS dataset](https://www.hydrosheds.org/products/hydrobasins) from HydroSHEDS could be sourced separately and matched by the `hybas_` gauge ID prefix. This is out of scope for the initial implementation.
+To display basin boundaries, the [HydroBASINS dataset](https://www.hydrosheds.org/products/hydrobasins) from HydroSHEDS could be sourced separately and matched by the numeric part of the `hybas_` / `subhybas_` gauge ID. This is out of scope for the initial implementation.
 
 ## License
 
