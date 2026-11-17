@@ -213,6 +213,80 @@ type Feature = {
     geometry: { type: 'Point'; coordinates: number[] } | PolygonGeometry;
 };
 
+/**
+ * Properties that make a polygon marker invisible in ATAK.
+ *
+ * CloudTAK (node-cot >= 14.58.0) turns a Polygon with a marker `type` into a
+ * marker CoT with a `<shape><polyline>`. ATAK removes the polygon together
+ * with that marker once `stale` passes, unlike a `u-d-f` drawing, which never
+ * expires. The marker has no icon, so ATAK would draw an unknown-type "?" on
+ * it: alpha 0 (`<color argb>`) hides that.
+ *
+ * Do NOT give a polygon feature an `icon`: a valid `usericon` makes ATAK move
+ * the marker to another map group, which deletes the polygon it owns. Icons
+ * belong on separate Point features (the gauge, or `centerFeature`).
+ */
+export const HIDDEN_MARKER_PROPERTIES = {
+    'marker-color': '#808080',
+    'marker-opacity': 0
+} as const;
+
+/** Lifetime of a polygon when the source gives no usable end time */
+export const POLYGON_DEFAULT_STALE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * CoT `stale` for a polygon. Polygons used to be `u-d-f` drawings, which ATAK
+ * never expires, so none of them set one and node-cot's 20 second default
+ * applied. Now that a polygon expires with its marker it needs a real value:
+ * the source end time if it is still in the future, otherwise 24 hours out
+ */
+export function polygonStale(end: string | undefined, now: number = Date.now()): string {
+    const endMs = end ? new Date(end).getTime() : NaN;
+    return new Date(Number.isFinite(endMs) && endMs > now ? endMs : now + POLYGON_DEFAULT_STALE_MS).toISOString();
+}
+
+/** End of a flash flood forecast, or undefined if the issue time is unusable */
+export function flashFloodEnd(issueTime: string, periodHours: number): string | undefined {
+    const issued = new Date(issueTime).getTime();
+    if (!Number.isFinite(issued) || !Number.isFinite(periodHours)) return undefined;
+    return new Date(issued + periodHours * 3600000).toISOString();
+}
+
+/** Area weighted centroid of the outer ring, falling back to the vertex mean */
+export function polygonCentroid(coordinates: number[][][]): [number, number] {
+    const ring = coordinates[0];
+    let area = 0;
+    let cx = 0;
+    let cy = 0;
+    for (let i = 0; i < ring.length - 1; i++) {
+        const cross = ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+        area += cross;
+        cx += (ring[i][0] + ring[i + 1][0]) * cross;
+        cy += (ring[i][1] + ring[i + 1][1]) * cross;
+    }
+    if (Math.abs(area) < 1e-12) {
+        return [
+            ring.reduce((sum, p) => sum + p[0], 0) / ring.length,
+            ring.reduce((sum, p) => sum + p[1], 0) / ring.length
+        ];
+    }
+    return [cx / (3 * area), cy / (3 * area)];
+}
+
+/**
+ * Icon point for a polygon, so it can still be tapped in ATAK now that its
+ * marker is invisible. Carries the polygon's callsign, remarks and metadata
+ */
+export function centerFeature(polygon: Feature, icon: string, color: string): Feature {
+    const { callsign, type, remarks, metadata, stale } = polygon.properties;
+    return {
+        id: `${polygon.id}-center`,
+        type: 'Feature',
+        properties: { callsign, type, remarks, metadata, stale, icon, 'marker-color': color },
+        geometry: { type: 'Point', coordinates: polygonCentroid((polygon.geometry as PolygonGeometry).coordinates) }
+    };
+}
+
 function severityIndex(s: string): number {
     const idx = SEVERITY_ORDER.indexOf(s as typeof SEVERITY_ORDER[number]);
     return idx >= 0 ? idx : -1;
@@ -788,6 +862,8 @@ export default class Task extends ETL {
                                 properties: {
                                     callsign: `Inundation: ${status.gaugeId} — ${map.mapType} ${level.level}`,
                                     type: 'a-f-X-i-m-f',
+                                    ...HIDDEN_MARKER_PROPERTIES,
+                                    stale: polygonStale(status.forecastTimeRange?.end),
                                     stroke: fillColor, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                                     'fill-opacity': POLYGON_OPACITY, fill: fillColor,
                                     metadata: {
@@ -829,6 +905,8 @@ export default class Task extends ETL {
                         properties: {
                             callsign: `Flood Basin: ${displaySeverity(status.severity)}`,
                             type: 'a-f-X-i-m-f',
+                            ...HIDDEN_MARKER_PROPERTIES,
+                            stale: polygonStale(status.forecastTimeRange?.end),
                             stroke: color, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                             'fill-opacity': POLYGON_OPACITY, fill: color,
                             remarks: this.buildGaugeRemarks(
@@ -921,6 +999,8 @@ export default class Task extends ETL {
                         properties: {
                             callsign: `Flash Flood: ${ff.affectedCountryCodes?.join(', ') || 'Unknown'}`,
                             type: 'a-f-X-i-m-f',
+                            ...HIDDEN_MARKER_PROPERTIES,
+                            stale: polygonStale(flashFloodEnd(ff.forecastIssueTime, ff.forecastPeriodHours)),
                             stroke: FLASH_FLOOD_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                             'fill-opacity': POLYGON_OPACITY, fill: FLASH_FLOOD_FILL,
                             remarks: [
@@ -940,6 +1020,7 @@ export default class Task extends ETL {
                         },
                         geometry: polys[pi]
                     });
+                    features.push(centerFeature(features[features.length - 1], FLOOD_ICON, FLASH_FLOOD_FILL));
                 }
             }
         }
@@ -968,6 +1049,8 @@ export default class Task extends ETL {
                             properties: {
                                 callsign: `Significant Flood Event: ${countries}`,
                                 type: 'a-f-X-i-m-f',
+                                ...HIDDEN_MARKER_PROPERTIES,
+                                stale: polygonStale(evt.eventInterval?.minimumEndTime),
                                 stroke: SIGNIFICANT_EVENT_FILL, 'stroke-opacity': POLYGON_OPACITY, 'stroke-width': 2, 'stroke-style': 'solid',
                                 'fill-opacity': POLYGON_OPACITY, fill: SIGNIFICANT_EVENT_FILL,
                                 remarks: remarkLines.join('\n'),
@@ -984,6 +1067,7 @@ export default class Task extends ETL {
                             },
                             geometry: polys[pi]
                         });
+                        features.push(centerFeature(features[features.length - 1], FLOOD_ICON, SIGNIFICANT_EVENT_FILL));
                     }
                 }
             }
