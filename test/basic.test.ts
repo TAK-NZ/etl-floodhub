@@ -101,3 +101,73 @@ test('capabilities.json is a valid manifest matching the task', async () => {
     }
     assert.equal(doc.invocations.incoming?.schedule?.default.schedule, 'rate(2 minutes)');
 });
+
+const {
+    HIDDEN_MARKER_PROPERTIES, POLYGON_DEFAULT_STALE_MS, polygonStale, flashFloodEnd, polygonCentroid, centerFeature
+} = await import('../task.js');
+const { CoTParser } = await import('@tak-ps/node-cot');
+
+const NOW = Date.parse('2030-01-01T00:00:00Z');
+const RING = [[170, -43], [172, -43], [172, -45], [170, -45], [170, -43]];
+
+test('polygonStale uses a future end time', () => {
+    assert.equal(polygonStale('2030-01-02T00:00:00Z', NOW), '2030-01-02T00:00:00.000Z');
+});
+
+test('polygonStale falls back to 24h without a usable future end time', () => {
+    const fallback = new Date(NOW + POLYGON_DEFAULT_STALE_MS).toISOString();
+    assert.equal(polygonStale(undefined, NOW), fallback);
+    assert.equal(polygonStale('not a date', NOW), fallback);
+    assert.equal(polygonStale('2029-12-31T00:00:00Z', NOW), fallback, 'a past end would be dropped as stale');
+});
+
+test('flashFloodEnd adds the forecast period to the issue time', () => {
+    assert.equal(flashFloodEnd('2030-01-01T00:00:00Z', 24), '2030-01-02T00:00:00.000Z');
+    assert.equal(flashFloodEnd('garbage', 24), undefined);
+    assert.equal(flashFloodEnd('2030-01-01T00:00:00Z', NaN), undefined);
+});
+
+test('polygonCentroid of a square is its middle', () => {
+    assert.deepEqual(polygonCentroid([RING]).map((n) => Math.round(n * 1e6) / 1e6), [171, -44]);
+});
+
+test('centerFeature is an icon point carrying the polygon details', () => {
+    const polygon = {
+        id: 'floodhub-flash-x-0',
+        type: 'Feature' as const,
+        properties: { callsign: 'Flash Flood', type: 'a-f-X-i-m-f', remarks: 'r', metadata: { a: 1 }, stale: '2030-01-02T00:00:00.000Z' },
+        geometry: { type: 'Polygon' as const, coordinates: [RING] }
+    };
+    const center = centerFeature(polygon, 'set:flood.png', '#FF7700');
+    assert.equal(center.id, 'floodhub-flash-x-0-center');
+    assert.equal(center.geometry.type, 'Point');
+    assert.equal(center.properties.icon, 'set:flood.png');
+    assert.equal(center.properties['marker-color'], '#FF7700');
+    assert.equal(center.properties.remarks, 'r');
+    assert.equal(center.properties.stale, polygon.properties.stale);
+});
+
+test('Polygon marker converts to an invisible, expiring marker with a polyline', async () => {
+    const stale = polygonStale(undefined, Date.now());
+    const cot = await CoTParser.from_geojson({
+        id: 'floodhub-basin-g-0',
+        type: 'Feature',
+        properties: {
+            callsign: 'Flood Basin', type: 'a-f-X-i-m-f', stale, ...HIDDEN_MARKER_PROPERTIES,
+            stroke: '#ff0000', 'stroke-opacity': 0.4, fill: '#ff0000', 'fill-opacity': 0.4
+        },
+        geometry: { type: 'Polygon', coordinates: [RING] }
+    } as never);
+    const event = cot.raw.event;
+
+    // A u-d-f drawing would never expire in ATAK
+    assert.equal(event._attributes.type, 'a-f-X-i-m-f');
+    assert.equal(event._attributes.stale, stale);
+    assert.ok(event.detail.shape?.polyline, 'detail.shape.polyline is set');
+
+    // A usericon makes ATAK delete the polygon; alpha 0 hides the "?" marker
+    assert.equal(event.detail.usericon, undefined);
+    const argb = Number(event.detail.color?._attributes?.argb);
+    assert.ok(Number.isFinite(argb));
+    assert.equal((argb >>> 24) & 0xff, 0);
+});

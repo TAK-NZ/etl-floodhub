@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## v1.1.2
+
+- Flood polygons (inundation, basin, flash flood and significant event) now expire. CloudTAK (`@tak-ps/node-cot` >= 14.58.0) converts a Polygon with a marker `type` (`a-f-X-i-m-f`) into a marker CoT with a `<shape><polyline>`, so ATAK removes the polygon together with the marker at `stale`. A `u-d-f` drawing never expires in ATAK. This already happens on CloudTAK >= 14.58.0; this release handles its side effects
+- Polygons now set `stale`. None did, so node-cot's 20 second default applied, and the polygons would now vanish almost immediately instead of persisting as drawings. Inundation and basin polygons use the gauge forecast end, flash flood polygons use the forecast issue time plus the forecast period, and significant event polygons use the minimum end time. A missing or past end time falls back to 24 hours from the run
+- The polygon marker is invisible (`marker-color` with `marker-opacity: 0`, written as `<color argb>` with alpha 0), otherwise ATAK draws an unknown-type "?" on it. It must not carry an `icon`: a valid `usericon` makes ATAK move the marker to another map group, which deletes the polygon it owns
+- Flash flood and significant event polygons get a separate `<id>-center` icon point (flood icon in the polygon colour, with the same remarks and metadata), because their marker is no longer tappable and they have no gauge point to select. Inundation and basin polygons rely on their gauge point
+- Add tests for the stale rules, centroid, icon point and the conversion of the polygon marker through `CoTParser.from_geojson` (adds `@tak-ps/node-cot` as a devDependency)
+- `npm audit` reports 0 vulnerabilities
+
 ## v1.1.1
 
 - Prepare for Google Flood Hub's semi-distributed riverine model (expected late November 2026), which renames gauges from `hybas_<id>` to `subhybas_<id>`, may move gauges between low and high confidence, and only provides data for the new gauges from the launch date. The ETL treats gauge IDs as opaque, so it follows the rename without configuration, but the CoT UIDs (`floodhub-<gaugeId>`) change with it
