@@ -1,5 +1,8 @@
 # CHANGELOG
 
+## v1.1.3
+- Update `@tak-ps/etl` to `^11.4.0`. CloudTAK v14 requires ETLs to be on ETL-Base v11 or higher. v11 publishes Output schemas as named schemas, so this task needed no change for that, and the release also works with CloudTAK v13
+- Update the other dependencies within their existing ranges, which clears the `npm audit --production` findings that the deploy workflow checks
 ## v1.1.2
 
 - Flood polygons (inundation, basin, flash flood and significant event) now expire. CloudTAK (`@tak-ps/node-cot` >= 14.58.0) converts a Polygon with a marker `type` (`a-f-X-i-m-f`) into a marker CoT with a `<shape><polyline>`, so ATAK removes the polygon together with the marker at `stale`. A `u-d-f` drawing never expires in ATAK. This already happens on CloudTAK >= 14.58.0; this release handles its side effects
